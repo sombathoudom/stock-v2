@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 
 import { mutation } from "./_generated/server";
 import { assertCents, dayString, getShop, moneyStr, requireUser } from "./helpers";
-import { computeOwed, computePaid } from "./sales";
+import { applyRefund, computeOwed, computePaid } from "./sales";
 import { checkoutPaymentMethod, paymentDoc } from "./types";
 
 // T11 — payments on existing orders (AGENTS.md rule #2). Money is recognized
@@ -108,7 +108,9 @@ export const receive = mutation({
 /**
  * Give money back to the customer: a payments row with a NEGATIVE amount
  * (method "refund") — paid/remaining and daily reports recompute themselves.
- * Can't refund more than has actually been paid.
+ * Can't refund more than has actually been paid. Thin wrapper over the
+ * shared `applyRefund` engine (sales.ts) so saveEdit / setStatus refunds
+ * write exactly the same row and event.
  */
 export const refund = mutation({
   args: {
@@ -122,31 +124,15 @@ export const refund = mutation({
     const shop = await getShop(ctx);
     const sale = await ctx.db.get(args.saleId);
     if (!sale) throw notFound();
-    const amount = assertCents(args.amount, "amount");
-    if (amount <= 0) throw badAmount("Refund amount must be more than zero.");
-    const paid = await computePaid(ctx, sale._id);
-    if (amount > paid) {
-      throw badAmount("Can't refund more than has been paid.");
-    }
-    const now = Date.now();
-    const note = args.note?.trim() || undefined;
-    const paymentId = await ctx.db.insert("payments", {
-      saleId: sale._id,
-      amount: -amount,
-      receivedAt: now,
-      receivedDay: dayString(now, shop.timezone),
-      method: "refund",
-      userId: staff._id,
-      note,
-    });
-    await ctx.db.insert("saleEvents", {
-      saleId: sale._id,
-      type: "refund",
-      summary: `Refund of ${moneyStr(amount)} given.`,
-      payload: { amount: String(amount), ...(note ? { note } : {}) },
-      userId: staff._id,
-      ts: now,
-    });
+    const paymentId = await applyRefund(
+      ctx,
+      sale,
+      staff,
+      args.amount,
+      args.note,
+      shop.timezone,
+      Date.now()
+    );
     return (await ctx.db.get(paymentId))!;
   },
 });

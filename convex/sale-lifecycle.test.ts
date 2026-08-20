@@ -281,18 +281,20 @@ describe("sale lifecycle invariants", () => {
     );
     check("S2 door below returned rejected with DELIVERED_BELOW_RETURNED", "DELIVERED_BELOW_RETURNED", doorCode);
 
-    // Marking the order delivered asserts the customer took everything: the
-    // cancelled piece leaves again and BOTH pieces are historically
-    // delivered — but the returned one still doesn't count as held.
+    // Marking the order delivered fills only the pieces still outstanding —
+    // the cancelled piece went back to the shelf and STAYS cancelled (it was
+    // never handed over, so it never becomes "with the customer"). The
+    // returned piece stays returned: nothing is held, nothing bills.
     const done = await t.mutation(api.sales.setStatus, { saleId, status: "delivered" });
     const doneItem = done.items[0].item;
-    check("S2 delivered: qtyDelivered 2 (historical, never erased)", 2, doneItem.qtyDelivered);
+    check("S2 delivered: qtyDelivered stays 1 (cancelled stays cancelled)", 1, doneItem.qtyDelivered);
+    check("S2 delivered: qtyCancelled stays 1", 1, doneItem.qtyCancelled);
     check("S2 delivered: qtyReturned still 1", 1, doneItem.qtyReturned);
-    check("S2 delivered: held 1", 1, held(doneItem));
-    check("S2 server-derived withCustomer", 1, done.items[0].withCustomer);
-    check("S2 delivered ledger", "purchase +10, sale -2, cancel +1, return +1, sale -1", await ledgerSummary(t, ids.teeM));
-    check("S2 delivered stock", 9, await stockOf(t, ids.teeM));
-    check("S2 delivered order total (1 billed piece)", SALE_PRICE, done.total);
+    check("S2 delivered: held 0", 0, held(doneItem));
+    check("S2 server-derived withCustomer", 0, done.items[0].withCustomer);
+    check("S2 delivered ledger", "purchase +10, sale -2, cancel +1, return +1", await ledgerSummary(t, ids.teeM));
+    check("S2 delivered stock", 10, await stockOf(t, ids.teeM));
+    check("S2 delivered order total (0 billed pieces)", 0, done.total);
   });
 
   test("S8 — door adjust after a partial return: re-deliverable, cancelled never double-counts returns", async () => {
@@ -389,14 +391,18 @@ describe("sale lifecycle invariants", () => {
     check("S4 stock", 9, await stockOf(t, ids.teeM));
     check("S4 billed total", SALE_PRICE, edited.total);
 
-    // Delivering claims the customer took everything: the cancelled piece
-    // leaves again, the line ends final.
+    // Delivering fills only the still-OUTSTANDING piece (the customer took
+    // it) — the cancelled piece stays cancelled and never becomes "with the
+    // customer" (the reported bug). Bookkeeping only: the outstanding piece
+    // was already deducted at checkout, so no new ledger row.
     const done = await t.mutation(api.sales.setStatus, { saleId, status: "delivered" });
     const doneItem = done.items[0].item;
-    check("S4 delivered: delivered 2", 2, doneItem.qtyDelivered);
-    check("S4 delivered: cancelled 0", 0, doneItem.qtyCancelled);
-    check("S4 delivered ledger", "purchase +10, sale -2, cancel +1, sale -1", await ledgerSummary(t, ids.teeM));
-    check("S4 delivered stock", 8, await stockOf(t, ids.teeM));
+    check("S4 delivered: delivered 1 (only the outstanding piece)", 1, doneItem.qtyDelivered);
+    check("S4 delivered: cancelled stays 1", 1, doneItem.qtyCancelled);
+    check("S4 delivered: held 1 (the piece the customer took)", 1, held(doneItem));
+    check("S4 delivered ledger", "purchase +10, sale -2, cancel +1", await ledgerSummary(t, ids.teeM));
+    check("S4 delivered stock", 9, await stockOf(t, ids.teeM));
+    check("S4 delivered total (1 billed piece)", SALE_PRICE, done.total);
   });
 
   test("S5 — payment +$6 then refund −$6: paid nets to zero", async () => {

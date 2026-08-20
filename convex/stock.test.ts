@@ -371,8 +371,21 @@ describe("stock.variantHistory", () => {
     expect(history.total).toBe(3);
     const [adjustment, saleRow, purchase] = history.page;
     expect(adjustment.reference).toBeUndefined();
-    expect(saleRow.reference).toEqual({ kind: "order", code: sale.sale.code });
-    expect(purchase.reference).toEqual({ kind: "po", code: "P-001" });
+    // The reference now carries the linked ids + names for the viewer.
+    expect(saleRow.reference).toEqual({
+      kind: "order",
+      code: sale.sale.code,
+      saleId: sale.sale._id,
+      customerName: "Dara",
+      channelName: "Facebook",
+    });
+    expect(purchase.reference).toEqual({
+      kind: "po",
+      code: "P-001",
+      purchaseId: expect.any(String),
+      supplierName: "Supplier",
+      unitCost: 400,
+    });
   });
 
   test("pages by offset with an opaque cursor", async () => {

@@ -252,16 +252,36 @@ export const stockListItem = v.object({
 // belongs to. Reference is structured ({kind, code}) so the client can
 // localize "Order #1042" / "PO #208" through the labels module; it is
 // absent for adjustments, stocktakes and rows without a linked document.
+/** Order/PO reference on a movement row. Ids are Convex UUIDs — they are
+ * the app's public route keys ("every route carries only the UUID"), never
+ * enumerable numbers. `unitCost` is owner-only (staff never see costs). */
+export const ledgerHistoryReference = v.object({
+  kind: v.union(v.literal("order"), v.literal("po")),
+  code: v.string(),
+  saleId: v.optional(v.id("sales")),
+  purchaseId: v.optional(v.id("purchases")),
+  customerName: v.optional(v.string()),
+  channelName: v.optional(v.string()),
+  supplierName: v.optional(v.string()),
+  unitCost: v.optional(v.number()),
+});
+
+/** Range summary for the movement viewer — derived fresh from the immutable
+ * ledger, never stored: opening = Σ deltas before the range (0 when no From
+ * filter), in/out = positive/negative sums inside the range, closing =
+ * opening + in − out (equals current ledger stock when no filters). */
+export const ledgerRangeSummary = v.object({
+  opening: v.number(),
+  in: v.number(),
+  out: v.number(),
+  closing: v.number(),
+});
+
 export const ledgerHistoryItem = v.object({
   row: stockLedgerDoc,
   userName: v.string(),
   balance: v.number(),
-  reference: v.optional(
-    v.object({
-      kind: v.union(v.literal("order"), v.literal("po")),
-      code: v.string(),
-    })
-  ),
+  reference: v.optional(ledgerHistoryReference),
 });
 
 export const customerDoc = v.object({
@@ -451,6 +471,35 @@ export const saleEditItemInput = v.object({
   qty: v.number(),
   discount: v.optional(v.union(v.number(), v.null())), // undefined = keep, null = clear
   price: v.optional(v.number()), // unit-price override; undefined = keep / re-derive
+});
+
+// --- Return / correction resolutions (Edit Sale + guided cancel, T12+) ---
+
+/** What physically happened to pieces the customer was holding. Sent by the
+ * Edit Sale page / cancel review and applied by the SAME atomic mutation
+ * (saveEdit / setStatus) — never a separate half-applied write. */
+export const resolutionOutcome = v.union(
+  v.literal("returned_sellable"), // goods came back, back on the shelf
+  v.literal("returned_damaged"), // goods came back, cannot be sold
+  v.literal("still_with_customer"), // nothing happened — line stays billed
+  v.literal("delivery_incorrect") // never handed over; owner-only correction
+);
+
+/** One resolution: how many pieces of a line took a given outcome.
+ * `reason` is required by the server for `delivery_incorrect` (audit trail);
+ * the frontend shows the input only in that case. */
+export const resolutionInput = v.object({
+  saleItemId: v.id("saleItems"),
+  outcome: resolutionOutcome,
+  qty: v.number(),
+  reason: v.optional(v.string()),
+});
+
+/** Optional refund paid at the same time (negative payments row, method
+ * "refund"). Clamped server-side to what has actually been paid. */
+export const refundInput = v.object({
+  amount: v.number(),
+  note: v.optional(v.string()),
 });
 
 /** One line on the edit page: the line + what it sells + the numbers the

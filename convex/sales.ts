@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import type { Infer } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 
 import type { Doc, Id } from "./_generated/dataModel";
@@ -11,6 +12,7 @@ import {
   dayString,
   getShop,
   moneyStr,
+  requireOwner,
   requireUser,
   startOfDay,
 } from "./helpers";
@@ -18,6 +20,8 @@ import { variantQty } from "./stock";
 import {
   checkoutLine,
   checkoutPayment,
+  refundInput,
+  resolutionInput,
   saleDetail,
   saleEditData,
   saleEditItemInput,
@@ -1135,7 +1139,12 @@ export const listOwedByCustomer = query({
 // Stages may be SKIPPED forward (a self-delivered order never needs a
 // "delivering" stage), but a finished delivery never re-opens: "delivered"
 // can only fall back to "partially_delivered" (a mistaken mark at the
-// door), never back to "delivering".
+// door), never back to "delivering". The one exception is full
+// cancellation: it stays a closing bookkeeping action, NOT a re-open —
+// every piece the customer was holding must be returned or corrected
+// first (held == 0 on all lines, enforced below), the line set stays
+// locked (DELIVERED_LOCKED_LINES in saveEdit), and the order's money
+// collapses to the charged trip fee.
 const ALLOWED_TRANSITIONS: Record<string, string[]> = {
   // Drafts stay closed here: confirming one must ALSO deduct its stock, and
   // this mutation only moves the status. Checkout creates confirmed sales
@@ -1149,7 +1158,7 @@ const ALLOWED_TRANSITIONS: Record<string, string[]> = {
   confirmed: ["pending", "packed", "delivering", "delivered", "partially_delivered", "cancelled"],
   packed: ["delivering", "delivered", "partially_delivered", "cancelled"],
   delivering: ["delivered", "partially_delivered", "cancelled"],
-  delivered: ["partially_delivered"],
+  delivered: ["partially_delivered", "cancelled"],
   partially_delivered: ["delivered", "delivering", "cancelled"],
   cancelled: [],
 };
@@ -1184,6 +1193,18 @@ async function transitionSaleStatus(
     });
   }
   if (target === "cancelled") {
+    // Cancelling drops pieces off the bill — returning them is the return
+    // flow's job, so nothing may still be held by the customer. The lines
+    // are re-read FRESH: a resolution in the same transaction (saveEdit /
+    // setStatus guided cancel) may have just lowered delivered or raised
+    // returned, and the held check must see the post-resolution state.
+    const items = await ctx.db
+      .query("saleItems")
+      .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
+      .collect();
+    for (const item of items) {
+      if (item.qtyDelivered - item.qtyReturned > 0) throw cannotCancelHeld();
+    }
     // Flow every outstanding piece back to the shelf. Per-line cancels
     // (T13) do the same for single lines.
     await cancelOutstanding(ctx, sale, staff, `Cancelled ${sale.code}`, now);
@@ -1234,6 +1255,12 @@ export const setStatus = mutation({
     // Cancelling only: the package went out and the trip happened, so the
     // customer still pays shipping even though the goods came back.
     chargeDeliveryFee: v.optional(v.boolean()),
+    // Guided cancellation (cancel review): the physical outcome of every
+    // held piece, an optional refund, and an optional reason — all applied
+    // in THIS one transaction, never a separate half-applied write.
+    resolutions: v.optional(v.array(resolutionInput)),
+    refund: v.optional(refundInput),
+    reason: v.optional(v.string()),
   },
   returns: saleDetail,
   handler: async (ctx, args) => {
@@ -1242,7 +1269,43 @@ export const setStatus = mutation({
     if (!sale) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Order not found." });
     }
+    // Resolutions / refund / reason are cancellation intents only — anything
+    // else is a client mistake, refused rather than silently ignored.
+    if (
+      args.status !== "cancelled" &&
+      (args.resolutions !== undefined ||
+        args.refund !== undefined ||
+        args.reason !== undefined)
+    ) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "Returns and refunds only apply when cancelling.",
+      });
+    }
+    // Idempotency BEFORE any write: a retried cancel (double-click) arrives
+    // with the status already set and must not re-apply its resolutions.
     if (args.status === sale.status) return await buildDetail(ctx, sale);
+    let now = Date.now();
+    if (args.resolutions !== undefined) {
+      await applyResolutions(ctx, sale, staff, args.resolutions, now);
+    }
+    // Later events sort after the resolution events in the events index even
+    // when the same transaction lands in one millisecond (same-ts ties would
+    // order arbitrarily).
+    now += 1;
+    if (args.refund !== undefined) {
+      const shop = await getShop(ctx);
+      await applyRefund(
+        ctx,
+        sale,
+        staff,
+        args.refund.amount,
+        args.refund.note,
+        shop.timezone,
+        now
+      );
+    }
+    now += 1;
     await transitionSaleStatus(
       ctx,
       sale,
@@ -1251,9 +1314,9 @@ export const setStatus = mutation({
       {
         deliveryFee: sale.deliveryFee,
         chargeDeliveryFee: args.chargeDeliveryFee,
-        note: args.note,
+        note: args.note ?? args.reason,
       },
-      Date.now()
+      now
     );
     return await buildDetail(ctx, (await ctx.db.get(sale._id))!);
   },
@@ -1324,9 +1387,16 @@ async function planOrderFields(
   }
 
   // Delivery module off → no company, no fees (checkout forces them to
-  // zero); editing delivery fields while it's off is a mistake.
+  // zero); editing delivery fields while it's off is a mistake — UNLESS the
+  // order already carries delivery data (fee/company from when the module
+  // was on): those stay visible and editable on the edit page, and may be
+  // cleared. A fee on a fee-less order while the module is off is still a
+  // client mistake.
+  const orderHasDelivery =
+    sale.deliveryFee > 0 || sale.deliveryCost > 0 || sale.deliveryCompanyId != null;
   if (
     !shop.deliveryEnabled &&
+    !orderHasDelivery &&
     (args.deliveryCompanyId !== undefined ||
       args.deliveryFee !== undefined ||
       args.deliveryCost !== undefined)
@@ -1546,6 +1616,11 @@ export const saveEdit = mutation({
     note: v.optional(v.union(v.string(), v.null())),
     status: v.optional(saleStatus),
     chargeDeliveryFee: v.optional(v.boolean()),
+    // Approved return/correction intents (Edit Sale page): the physical
+    // outcome of every held piece being removed or reduced, plus an optional
+    // refund — all applied in THIS one transaction with the rest of the edit.
+    resolutions: v.optional(v.array(resolutionInput)),
+    refund: v.optional(refundInput),
   },
   returns: saleDetail,
   handler: async (ctx, args) => {
@@ -1573,6 +1648,34 @@ export const saveEdit = mutation({
         message: "Too many lines on one order.",
       });
     }
+
+    // Approved returns / corrections FIRST, inside this same transaction —
+    // Phase 1 re-reads every line and sees the patched qtyReturned /
+    // qtyDelivered (read-your-writes), so the held floor and billed qty
+    // shrink exactly as the resolutions decided. Any later failure rolls
+    // everything back, resolutions and refund included — never a
+    // half-applied return plus a failed edit.
+    let now = Date.now();
+    if (args.resolutions !== undefined) {
+      await applyResolutions(ctx, sale, staff, args.resolutions, now);
+    }
+    // Everything after the resolutions sorts after them in the events index
+    // (by_sale_ts) even when the same transaction lands in one millisecond —
+    // same-ts ties would order arbitrarily.
+    now += 1;
+    if (args.refund !== undefined) {
+      await applyRefund(
+        ctx,
+        sale,
+        staff,
+        args.refund.amount,
+        args.refund.note,
+        shop.timezone,
+        now
+      );
+    }
+    // The line diff and status events sort after the refund event too.
+    now += 1;
 
     // ---- Phase 1: work everything out and check it. Nothing is written
     // here, so any rejection below leaves the order exactly as it was. ----
@@ -1801,8 +1904,6 @@ export const saveEdit = mutation({
 
     // ---- Phase 2: apply. This is the same transaction as the checks above,
     // so if anything below throws, every write here rolls back with it. ----
-
-    const now = Date.now();
 
     for (const plan of plans) {
       if (plan.kind === "new") {
@@ -2049,6 +2150,13 @@ const duplicateLine = () =>
     message: "The same line was sent twice.",
   });
 
+const cannotCancelHeld = () =>
+  new ConvexError({
+    code: "CANNOT_CANCEL_HELD",
+    message:
+      "Some pieces are still with the customer — return or correct them before cancelling.",
+  });
+
 const itemDiscountOutOfRange = () =>
   new ConvexError({
     code: "INVALID_MONEY",
@@ -2110,31 +2218,23 @@ export async function fillAllDelivered(
     .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
     .collect();
   for (const item of items) {
-    if (item.qtyCancelled > 0) {
-      const stock = await variantQty(ctx, item.variantId);
-      if (stock < item.qtyCancelled) {
-        throw new ConvexError({
-          code: "OUT_OF_STOCK",
-          message: "Cancelled pieces were sold to someone else in the meantime.",
-        });
-      }
-      await ctx.db.insert("stockLedger", {
-        variantId: item.variantId,
-        delta: -item.qtyCancelled,
-        reason: "sale",
-        saleItemId: item._id,
-        userId: staff._id,
-        ts: now,
-        note: `Sale ${sale.code}`,
-      });
-    }
+    // "Delivered" fills only the pieces that were still OUTSTANDING —
+    // ordered, not yet delivered, and never cancelled. Their deduction
+    // already happened at checkout (and any later raise wrote its own
+    // `sale` row), so filling them is BOOKKEEPING ONLY — no ledger row.
+    // Cancelled pieces went back to the shelf and STAY cancelled: they were
+    // never handed over, so they must never turn into "with the customer"
+    // (the reported bug). Re-delivering cancelled pieces deliberately is
+    // the door-adjust flow's job (setLineDelivered raises delivered with
+    // oversell checks + audit events).
+    const outstanding = item.qtyOrdered - item.qtyDelivered - item.qtyCancelled;
+    if (outstanding <= 0) continue;
     await ctx.db.patch(item._id, {
-      // Delivered is HISTORICAL and only ever grows: max() keeps a piece
-      // that was delivered before a return recorded as delivered (a returned
-      // piece was still handed over). "With the customer" is the derived
-      // difference qtyDelivered − qtyReturned, never stored here.
-      qtyDelivered: Math.max(item.qtyDelivered, item.qtyOrdered),
-      qtyCancelled: 0,
+      // Delivered is HISTORICAL and only ever grows: a returned piece was
+      // still handed over and stays recorded as delivered. "With the
+      // customer" is the derived difference qtyDelivered − qtyReturned,
+      // never stored here.
+      qtyDelivered: item.qtyDelivered + outstanding,
     });
   }
 }
@@ -2146,7 +2246,7 @@ export async function applyDeliveredAdjustments(
   ctx: { db: MutationCtx["db"] },
   sale: Doc<"sales">,
   staff: Doc<"users">,
-  adjustments: { saleItemId: Id<"saleItems">; qtyDelivered: number }[],
+  adjustments: { saleItemId: Id<"saleItems">; qtyDelivered: number; note?: string }[],
   now: number
 ): Promise<void> {
   for (const adj of adjustments) {
@@ -2230,6 +2330,10 @@ export async function applyDeliveredAdjustments(
         item: label,
         from: String(item.qtyDelivered),
         to: String(qty),
+        // The delivery_incorrect resolution (owner-gated) records WHY the
+        // delivered mark was wrong — the correction event sits next to the
+        // original event; nothing is ever rewritten (rule #8).
+        ...(adj.note?.trim() ? { note: adj.note.trim() } : {}),
       },
       userId: staff._id,
       ts: now,
@@ -2272,8 +2376,300 @@ export const setLineDelivered = mutation({
 // derived difference qtyDelivered − qtyReturned (0 ≤ qtyReturned ≤
 // qtyDelivered holds by construction). A returned piece can never be
 // "un-delivered" again for a second stock credit. Giving money back is a
-// separate refund row (payments.ts) — returning pieces and refunding are two
-// deliberate steps. Only pieces the customer actually holds can come back.
+// separate refund row — returning pieces and refunding are two deliberate
+// steps. Only pieces the customer actually holds can come back.
+//
+// THE SAME ENGINE is shared by the standalone return flow (`returnItems`
+// below), the Edit Sale page and the guided cancel review (resolutions via
+// `saveEdit` / `setStatus`) — there is exactly ONE place that knows how a
+// return moves stock, bills, and events.
+
+/** Flow returned pieces back to the shelf: one `return` ledger row per line,
+ * qtyReturned bumped, an items_returned event. The bound is what the
+ * customer CURRENTLY holds (derived qtyDelivered − qtyReturned), so a
+ * returned piece can never be credited twice. */
+export async function applyReturns(
+  ctx: { db: MutationCtx["db"] },
+  sale: Doc<"sales">,
+  staff: Doc<"users">,
+  returns: { saleItemId: Id<"saleItems">; qty: number }[],
+  now: number
+): Promise<void> {
+  if (returns.length === 0) return;
+  // Merge duplicate line entries server-side — the client sends intents,
+  // the server decides what actually happens.
+  const byLine = new Map<string, number>();
+  for (const ret of returns) {
+    byLine.set(ret.saleItemId, (byLine.get(ret.saleItemId) ?? 0) + ret.qty);
+  }
+  for (const [saleItemId, rawQty] of byLine) {
+    const item = await ctx.db.get(saleItemId as Id<"saleItems">);
+    if (!item || item.saleId !== sale._id) throw lineNotInSale();
+    // The bound is what the customer CURRENTLY holds — the derived
+    // qtyDelivered − qtyReturned — never the historical delivered count.
+    const maxReturnable = item.qtyDelivered - item.qtyReturned;
+    const qty = assertQty(rawQty, 1, "return qty");
+    if (qty > maxReturnable) {
+      throw new ConvexError({
+        code: "RETURN_EXCEEDS_HELD",
+        message: "Can't return more than the customer currently has.",
+      });
+    }
+    await ctx.db.insert("stockLedger", {
+      variantId: item.variantId,
+      delta: qty,
+      reason: "return",
+      saleItemId: item._id,
+      userId: staff._id,
+      ts: now,
+      note: `Returned — ${sale.code}`,
+    });
+    await ctx.db.patch(item._id, {
+      qtyReturned: item.qtyReturned + qty,
+    });
+    const variant = await ctx.db.get(item.variantId);
+    const product = variant ? await ctx.db.get(variant.productId) : null;
+    const label = variantLabel(product, variant);
+    await ctx.db.insert("saleEvents", {
+      saleId: sale._id,
+      type: "items_returned",
+      summary: `Returned ${label} (${qty}).`,
+      payload: { item: label, qty: String(qty) },
+      userId: staff._id,
+      ts: now,
+    });
+  }
+}
+
+/** Returned pieces that can't be sold again: the bill is reduced exactly
+ * like a sellable return, but the goods never reach the shelf — a `return`
+ * row followed by an `adjustment` row nets the stock to zero while
+ * recording BOTH movements, so the audit trail shows what came back AND
+ * where it went (no new stockLedger reason needed — the schema already
+ * represents this). */
+export async function applyDamagedReturns(
+  ctx: { db: MutationCtx["db"] },
+  sale: Doc<"sales">,
+  staff: Doc<"users">,
+  returns: { saleItemId: Id<"saleItems">; qty: number }[],
+  now: number
+): Promise<void> {
+  if (returns.length === 0) return;
+  const byLine = new Map<string, number>();
+  for (const ret of returns) {
+    byLine.set(ret.saleItemId, (byLine.get(ret.saleItemId) ?? 0) + ret.qty);
+  }
+  for (const [saleItemId, rawQty] of byLine) {
+    const item = await ctx.db.get(saleItemId as Id<"saleItems">);
+    if (!item || item.saleId !== sale._id) throw lineNotInSale();
+    const maxReturnable = item.qtyDelivered - item.qtyReturned;
+    const qty = assertQty(rawQty, 1, "return qty");
+    if (qty > maxReturnable) {
+      throw new ConvexError({
+        code: "RETURN_EXCEEDS_HELD",
+        message: "Can't return more than the customer currently has.",
+      });
+    }
+    await ctx.db.insert("stockLedger", {
+      variantId: item.variantId,
+      delta: qty,
+      reason: "return",
+      saleItemId: item._id,
+      userId: staff._id,
+      ts: now,
+      note: `Returned — ${sale.code}`,
+    });
+    await ctx.db.insert("stockLedger", {
+      variantId: item.variantId,
+      delta: -qty,
+      reason: "adjustment",
+      saleItemId: item._id,
+      userId: staff._id,
+      ts: now,
+      note: `Damaged — removed from sellable stock (${sale.code})`,
+    });
+    await ctx.db.patch(item._id, {
+      qtyReturned: item.qtyReturned + qty,
+    });
+    const variant = await ctx.db.get(item.variantId);
+    const product = variant ? await ctx.db.get(variant.productId) : null;
+    const label = variantLabel(product, variant);
+    await ctx.db.insert("saleEvents", {
+      saleId: sale._id,
+      type: "items_returned",
+      summary: `Returned ${label} (${qty}) — damaged.`,
+      payload: { item: label, qty: String(qty), outcome: "damaged" },
+      userId: staff._id,
+      ts: now,
+    });
+  }
+}
+
+/** Give money back to the customer: a payments row with a NEGATIVE amount
+ * (method "refund") — paid/remaining and daily reports recompute themselves.
+ * Can't refund more than has actually been paid (re-derived server-side).
+ * THE shared refund engine — used by payments.refund, saveEdit and setStatus,
+ * so a refund is written exactly once, exactly the same way, everywhere. */
+export async function applyRefund(
+  ctx: { db: MutationCtx["db"] },
+  sale: Doc<"sales">,
+  staff: Doc<"users">,
+  amount: number,
+  note: string | undefined,
+  timezone: string,
+  now: number
+): Promise<Id<"payments">> {
+  const cents = assertCents(amount, "amount");
+  if (cents <= 0) {
+    throw new ConvexError({
+      code: "INVALID_PAYMENT",
+      message: "Refund amount must be more than zero.",
+    });
+  }
+  const paid = await computePaid(ctx, sale._id);
+  if (cents > paid) {
+    throw new ConvexError({
+      code: "INVALID_PAYMENT",
+      message: "Can't refund more than has been paid.",
+    });
+  }
+  const trimmed = note?.trim() || undefined;
+  const paymentId = await ctx.db.insert("payments", {
+    saleId: sale._id,
+    amount: -cents,
+    receivedAt: now,
+    receivedDay: dayString(now, timezone),
+    method: "refund",
+    userId: staff._id,
+    note: trimmed,
+  });
+  await ctx.db.insert("saleEvents", {
+    saleId: sale._id,
+    type: "refund",
+    summary: `Refund of ${moneyStr(cents)} given.`,
+    payload: { amount: String(cents), ...(trimmed ? { note: trimmed } : {}) },
+    userId: staff._id,
+    ts: now,
+  });
+  return paymentId;
+}
+
+/** One resolution as sent by the Edit Sale page / cancel review. */
+type Resolution = Infer<typeof resolutionInput>;
+
+/**
+ * Apply the approved physical-outcome resolutions in ONE transaction: the
+ * customer-held pieces a line loses either came back (sellable or damaged),
+ * stayed with the customer (no-op), or were never handed over (owner-only
+ * delivery correction). Shared by saveEdit and setStatus — the same helpers
+ * the standalone return flow uses, so there is exactly one place that knows
+ * how each outcome moves stock.
+ *
+ * Validation happens ENTIRELY before any write — a bad resolution can never
+ * leave a half-applied return. Then the apply order matters: corrections
+ * (delivery_incorrect) shrink the held bound first, returns re-read it.
+ */
+export async function applyResolutions(
+  ctx: MutationCtx,
+  sale: Doc<"sales">,
+  staff: Doc<"users">,
+  resolutions: Resolution[],
+  now: number
+): Promise<void> {
+  if (resolutions.length === 0) return;
+
+  // ---- Validate phase (nothing written) ----
+  // Merge duplicate (line, outcome) entries server-side — the client sends
+  // intents, the server decides what actually happens.
+  const byKey = new Map<
+    string,
+    { saleItemId: Id<"saleItems">; outcome: Resolution["outcome"]; rawQty: number; reason?: string }
+  >();
+  for (const r of resolutions) {
+    const key = `${r.saleItemId}:${r.outcome}`;
+    const prev = byKey.get(key);
+    byKey.set(key, {
+      saleItemId: r.saleItemId,
+      outcome: r.outcome,
+      rawQty: (prev?.rawQty ?? 0) + r.qty,
+      reason: r.reason,
+    });
+  }
+  const lines = new Map<Id<"saleItems">, Doc<"saleItems">>();
+  const totalByLine = new Map<Id<"saleItems">, number>();
+  for (const r of byKey.values()) {
+    let item: Doc<"saleItems"> | null = lines.get(r.saleItemId) ?? null;
+    if (!item) {
+      item = await ctx.db.get(r.saleItemId);
+      if (!item || item.saleId !== sale._id) throw lineNotInSale();
+      lines.set(r.saleItemId, item);
+    }
+    const qty = assertQty(r.rawQty, 1, "resolution qty");
+    totalByLine.set(r.saleItemId, (totalByLine.get(r.saleItemId) ?? 0) + qty);
+  }
+  // The SUM across ALL outcomes on a line may never exceed what the customer
+  // holds — a piece can only be resolved once (per-outcome bounds alone miss
+  // e.g. sellable 1 + incorrect 2 on a line holding 2).
+  for (const [saleItemId, total] of totalByLine) {
+    const item = lines.get(saleItemId)!;
+    const held = item.qtyDelivered - item.qtyReturned;
+    if (total > held) {
+      throw new ConvexError({
+        code: "RETURN_EXCEEDS_HELD",
+        message: "Can't resolve more than the customer currently has.",
+      });
+    }
+  }
+  // delivery_incorrect is an owner-only lifecycle correction that needs a
+  // reason — it rewrites what the system says happened to the goods.
+  for (const r of byKey.values()) {
+    if (r.outcome !== "delivery_incorrect") continue;
+    await requireOwner(ctx);
+    if (!r.reason?.trim()) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "A reason is required when fixing a wrong delivery mark.",
+      });
+    }
+  }
+
+  // ---- Apply phase: corrections first (they shrink the held bound), then
+  // returns (their own bound re-reads the post-correction held).
+  // still_with_customer writes nothing by design — the pieces stay on the
+  // bill and in the customer's hands; the edit floor keeps working. ----
+  for (const r of byKey.values()) {
+    if (r.outcome !== "delivery_incorrect") continue;
+    const item = lines.get(r.saleItemId)!;
+    await applyDeliveredAdjustments(
+      ctx,
+      sale,
+      staff,
+      [
+        {
+          saleItemId: r.saleItemId,
+          qtyDelivered: item.qtyDelivered - r.rawQty,
+          note: r.reason,
+        },
+      ],
+      now
+    );
+  }
+  const sellable: { saleItemId: Id<"saleItems">; qty: number }[] = [];
+  const damaged: { saleItemId: Id<"saleItems">; qty: number }[] = [];
+  for (const r of byKey.values()) {
+    if (r.outcome === "returned_sellable") {
+      sellable.push({ saleItemId: r.saleItemId, qty: r.rawQty });
+    } else if (r.outcome === "returned_damaged") {
+      damaged.push({ saleItemId: r.saleItemId, qty: r.rawQty });
+    }
+  }
+  if (sellable.length > 0) await applyReturns(ctx, sale, staff, sellable, now);
+  if (damaged.length > 0) await applyDamagedReturns(ctx, sale, staff, damaged, now);
+}
+
+/** Standalone return flow (Sales list / order detail): returns pieces with
+ * an optional separate refund — kept as a thin wrapper so every path runs
+ * through the same engine. */
 export const returnItems = mutation({
   args: {
     saleId: v.id("sales"),
@@ -2289,50 +2685,8 @@ export const returnItems = mutation({
     if (sale.status === "draft" || sale.status === "cancelled") {
       throw lockedSale();
     }
-    // Merge duplicate line entries server-side — the client sends intents,
-    // the server decides what actually happens.
-    const byLine = new Map<string, number>();
-    for (const ret of args.returns) {
-      byLine.set(ret.saleItemId, (byLine.get(ret.saleItemId) ?? 0) + ret.qty);
-    }
     const now = Date.now();
-    for (const [saleItemId, rawQty] of byLine) {
-      const item = await ctx.db.get(saleItemId as Id<"saleItems">);
-      if (!item || item.saleId !== sale._id) throw lineNotInSale();
-      // The bound is what the customer CURRENTLY holds — the derived
-      // qtyDelivered − qtyReturned — never the historical delivered count.
-      const maxReturnable = item.qtyDelivered - item.qtyReturned;
-      const qty = assertQty(rawQty, 1, "return qty");
-      if (qty > maxReturnable) {
-        throw new ConvexError({
-          code: "RETURN_EXCEEDS_HELD",
-          message: "Can't return more than the customer currently has.",
-        });
-      }
-      await ctx.db.insert("stockLedger", {
-        variantId: item.variantId,
-        delta: qty,
-        reason: "return",
-        saleItemId: item._id,
-        userId: staff._id,
-        ts: now,
-        note: `Returned — ${sale.code}`,
-      });
-      await ctx.db.patch(item._id, {
-        qtyReturned: item.qtyReturned + qty,
-      });
-      const variant = await ctx.db.get(item.variantId);
-      const product = variant ? await ctx.db.get(variant.productId) : null;
-      const label = variantLabel(product, variant);
-      await ctx.db.insert("saleEvents", {
-        saleId: sale._id,
-        type: "items_returned",
-        summary: `Returned ${label} (${qty}).`,
-        payload: { item: label, qty: String(qty) },
-        userId: staff._id,
-        ts: now,
-      });
-    }
+    await applyReturns(ctx, sale, staff, args.returns, now);
     return await buildDetail(ctx, (await ctx.db.get(sale._id))!);
   },
 });

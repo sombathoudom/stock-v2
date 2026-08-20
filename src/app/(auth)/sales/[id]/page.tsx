@@ -5,7 +5,6 @@ import {
   Edit01Icon,
   HistoryIcon,
   MoneyAdd01Icon,
-  PackageReceive01Icon,
   PrinterIcon,
   ShoppingBag01Icon,
   SlidersHorizontalIcon,
@@ -26,6 +25,9 @@ import {
   AdjustDeliveryDialog,
   ReturnItemDialog,
 } from "@/components/features/sales/order-adjustments";
+import { CancelSaleReviewDialog } from "@/components/features/sales/cancel-sale-review-dialog";
+import { SaleItemGroups } from "@/components/features/sales/sale-items-groups";
+import { PaymentHistory } from "@/components/features/sales/payment-history";
 import { SaleStatusBadge } from "@/components/features/sales/sale-status-badge";
 import {
   CAN_CANCEL,
@@ -35,19 +37,8 @@ import {
 } from "@/components/features/sales/sale-status-flow";
 import { PageToolbar } from "@/components/features/shell/page-toolbar";
 import { QueryErrorBoundary } from "@/components/features/shell/query-error-boundary";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -65,14 +56,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import {
   formatDateTime,
@@ -149,31 +132,6 @@ function saleEditedFieldLabel(field: string | undefined): string {
   return map[field] ?? field;
 }
 
-/** Per-line plain-language state. `qtyDelivered` is HISTORICAL (invariant 5 —
- * returning never erases it), so "Delivered 1 / Returned 1" shows here as
- * "Returned", never "with customer 0 pieces". The held count is the derived
- * difference (invariant 6) and never a stored field. */
-function lineStateText(
-  item: {
-    qtyOrdered: number;
-    qtyCancelled: number;
-    qtyReturned: number;
-  },
-  withCustomer: number,
-  itemQtys: {
-    cancelled: string;
-    returned: string;
-    withCustomer: string;
-    notDeliveredYet: string;
-  }
-): string {
-  const billed = item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
-  if (billed <= 0) {
-    return item.qtyReturned > 0 ? itemQtys.returned : itemQtys.cancelled;
-  }
-  return withCustomer > 0 ? itemQtys.withCustomer : itemQtys.notDeliveredYet;
-}
-
 export default function SaleDetailPage({
   params,
 }: {
@@ -232,26 +190,9 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
   const timezone = shop?.timezone ?? "Asia/Phnom_Penh";
 
   const setStatus = useMutation(api.sales.setStatus);
-  const receive = useMutation(api.payments.receive);
-  const refund = useMutation(api.payments.refund);
-
-  // --- Receive payment form ---
-  const [amount, setAmount] = useState("");
-  const [method, setMethod] = useState<"cash" | "bank_transfer" | "other">("cash");
-  const [note, setNote] = useState("");
-  const [receiving, setReceiving] = useState(false);
-  const amountCents = inputToCents(amount) ?? 0;
-
-  // --- Refund form ---
-  const [refundAmount, setRefundAmount] = useState("");
-  const [refundNote, setRefundNote] = useState("");
-  const [refunding, setRefunding] = useState(false);
-  const refundCents = inputToCents(refundAmount) ?? 0;
 
   const [changing, setChanging] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
-  // Cancel with the trip still billed — the package went out and came back.
-  const [keepShipping, setKeepShipping] = useState(false);
   const [invoiceOpen, setInvoiceOpen] = useState(false);
 
   // T13/T15 — order adjustments (hidden on drafts and cancelled orders,
@@ -270,57 +211,12 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
       await setStatus({
         saleId: detail.sale._id,
         status,
-        // Only a cancel can bill the trip; the server ignores it otherwise.
-        ...(status === "cancelled" && keepShipping
-          ? { chargeDeliveryFee: true }
-          : {}),
       });
       toast.success(t().sales.statusUpdated);
-      setCancelOpen(false);
-      setKeepShipping(false);
     } catch (err) {
       toastError(err);
     } finally {
       setChanging(false);
-    }
-  }
-
-  async function doReceive() {
-    if (amountCents <= 0 || amountCents > detail.remaining) return;
-    setReceiving(true);
-    try {
-      await receive({
-        saleId: detail.sale._id,
-        amount: amountCents,
-        method,
-        note: note.trim() || undefined,
-      });
-      toast.success(t().sales.paymentAdded);
-      setAmount("");
-      setNote("");
-    } catch (err) {
-      toastError(err);
-    } finally {
-      setReceiving(false);
-    }
-  }
-
-  async function doRefund() {
-    if (refundCents <= 0 || refundCents > detail.paid) return;
-    setRefunding(true);
-    try {
-      await refund({
-        saleId: detail.sale._id,
-        amount: refundCents,
-        note: refundNote.trim() || undefined,
-      });
-      toast.success(t().sales.refundAdded);
-      setRefundAmount("");
-      setRefundNote("");
-    } catch (err) {
-      toastError(err);
-    } finally {
-      setRefunding(false);
     }
   }
 
@@ -362,242 +258,35 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
             <CardHeader>
               <CardTitle>{t().sales.order}</CardTitle>
             </CardHeader>
-            <CardContent className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t().common.name}</TableHead>
-                    <TableHead className="text-right">{t().sales.itemQtys.ordered}</TableHead>
-                    <TableHead className="text-right">{t().sales.itemQtys.delivered}</TableHead>
-                    <TableHead className="text-right">{t().sales.itemQtys.cancelled}</TableHead>
-                    <TableHead className="text-right">{t().sales.itemQtys.returned}</TableHead>
-                    <TableHead className="text-right">{t().sales.itemQtys.withCustomer}</TableHead>
-                    <TableHead className="text-right">{t().sales.price}</TableHead>
-                    <TableHead className="text-right">{t().sales.total}</TableHead>
-                    {adjustable ? (
-                      <TableHead className="text-right">
-                        {t().common.actions}
-                      </TableHead>
-                    ) : null}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {detail.items.map(({ item, variant, product, withCustomer }) => (
-                    <TableRow key={item._id}>
-                      <TableCell>
-                        {product.name}
-                        <span className="block text-xs text-muted-foreground">
-                          {variant.size}
-                          {variant.color ? ` · ${variant.color}` : ""}
-                        </span>
-                        <span className="block text-xs text-muted-foreground">
-                          {lineStateText(item, withCustomer, t().sales.itemQtys)}
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{item.qtyOrdered}</TableCell>
-                      <TableCell className="text-right tabular-nums">{item.qtyDelivered}</TableCell>
-                      <TableCell className="text-right tabular-nums">{item.qtyCancelled}</TableCell>
-                      <TableCell className="text-right tabular-nums">{item.qtyReturned}</TableCell>
-                      <TableCell className="text-right tabular-nums">{withCustomer}</TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {formatMoney(item.unitPrice, currency, getLang())}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {formatMoney(
-                          item.unitPrice *
-                            (item.qtyOrdered -
-                              item.qtyCancelled -
-                              item.qtyReturned) -
-                            (item.discount ?? 0),
-                          currency,
-                          getLang()
-                        )}
-                      </TableCell>
-                      {adjustable ? (
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="size-11"
-                              onClick={() => setAdjustOpen(true)}
-                              aria-label={`${t().sales.adjust} — ${product.name}`}
-                            >
-                              <HugeiconsIcon
-                                icon={SlidersHorizontalIcon}
-                                strokeWidth={2}
-                                className="size-4"
-                              />
-                            </Button>
-                            {withCustomer > 0 ? (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                className="size-11"
-                                onClick={() =>
-                                  setReturnLine({ item, variant, product, withCustomer })
-                                }
-                                aria-label={`${t().sales.returnItem} — ${product.name}`}
-                              >
-                                <HugeiconsIcon
-                                  icon={PackageReceive01Icon}
-                                  strokeWidth={2}
-                                  className="size-4"
-                                />
-                              </Button>
-                            ) : null}
-                          </div>
-                        </TableCell>
-                      ) : null}
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+            <CardContent className="p-0 md:px-0">
+              <SaleItemGroups
+                items={detail.items}
+                currency={currency}
+                adjustable={adjustable}
+                onAdjust={() => setAdjustOpen(true)}
+                onReturn={(line) => setReturnLine(line)}
+              />
             </CardContent>
           </Card>
 
-          {/* Payments: receive + refund + history */}
+          {/* Payments: summary + receive/refund + transaction history —
+              every number derived from the server payment rows. */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <HugeiconsIcon icon={MoneyAdd01Icon} strokeWidth={2} className="size-4" />
                 {t().sales.paymentHistory}
               </CardTitle>
-              {detail.remaining > 0 ? (
-                <CardDescription>
-                  {t().sales.remaining}:{" "}
-                  <span className="font-medium tabular-nums">
-                    {formatMoney(detail.remaining, currency, getLang())}
-                  </span>
-                </CardDescription>
-              ) : (
-                <CardDescription>{t().sales.paid}</CardDescription>
-              )}
             </CardHeader>
-            <CardContent className="flex flex-col gap-4">
-              {/* Receive */}
-              <div className="grid gap-2 rounded-md border p-3 sm:grid-cols-[1fr_140px_1fr_auto] sm:items-end">
-                <div className="grid gap-1">
-                  <Label>{t().sales.amountReceived}</Label>
-                  <Input
-                    inputMode="decimal"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                    placeholder="0.00"
-                  />
-                </div>
-                <div className="grid gap-1">
-                  <Label>{t().sales.method}</Label>
-                  <Select
-                    value={method}
-                    // Base UI shows the RAW value in the trigger without this map.
-                    items={{
-                      cash: t().sales.methods.cash,
-                      bank_transfer: t().sales.methods.bank_transfer,
-                      other: t().sales.methods.other,
-                    }}
-                    onValueChange={(v) =>
-                      setMethod(v as "cash" | "bank_transfer" | "other")
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="cash">{t().sales.methods.cash}</SelectItem>
-                      <SelectItem value="bank_transfer">
-                        {t().sales.methods.bank_transfer}
-                      </SelectItem>
-                      <SelectItem value="other">{t().sales.methods.other}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1">
-                  <Label>{t().common.note}</Label>
-                  <Input
-                    value={note}
-                    onChange={(e) => setNote(e.target.value)}
-                    maxLength={200}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  disabled={
-                    receiving || amountCents <= 0 || amountCents > detail.remaining
-                  }
-                  onClick={() => void doReceive()}
-                >
-                  {t().sales.receivePayment}
-                </Button>
-              </div>
-
-              {/* Refund */}
-              <div className="grid gap-2 rounded-md border p-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-                <div className="grid gap-1">
-                  <Label>{t().sales.refund}</Label>
-                  <Input
-                    inputMode="decimal"
-                    value={refundAmount}
-                    onChange={(e) => setRefundAmount(e.target.value)}
-                    placeholder="0.00"
-                  />
-                </div>
-                <div className="grid gap-1">
-                  <Label>{t().common.note}</Label>
-                  <Input
-                    value={refundNote}
-                    onChange={(e) => setRefundNote(e.target.value)}
-                    maxLength={200}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={
-                    refunding || refundCents <= 0 || refundCents > detail.paid
-                  }
-                  onClick={() => void doRefund()}
-                >
-                  <HugeiconsIcon icon={CashbackIcon} strokeWidth={2} className="size-4" />
-                  {t().sales.refund}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {t().sales.refundHint}
-              </p>
-
-              {/* History */}
-              {payments.length === 0 ? (
-                <p className="py-2 text-center text-sm text-muted-foreground">
-                  {t().sales.emptyHistory}
-                </p>
-              ) : (
-                <ul className="flex flex-col divide-y">
-                  {payments.map((p) => (
-                    <li
-                      key={p._id}
-                      className="flex flex-wrap items-center gap-2 py-2 text-sm"
-                    >
-                      <span className="text-muted-foreground">
-                        {formatDateTime(p.receivedAt, timezone, getLang())}
-                      </span>
-                      <Badge variant="secondary">{t().sales.methods[p.method]}</Badge>
-                      <span className="ml-auto tabular-nums">
-                        {p.amount < 0
-                          ? `−${formatMoney(-p.amount, currency, getLang())}`
-                          : formatMoney(p.amount, currency, getLang())}
-                      </span>
-                      {p.note ? (
-                        <span className="w-full text-xs text-muted-foreground">
-                          {p.note}
-                        </span>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
+            <CardContent>
+              <PaymentHistory
+                saleId={detail.sale._id}
+                orderTotal={detail.total}
+                currency={currency}
+                timezone={timezone}
+                payments={detail.payments}
+                events={detail.events}
+              />
             </CardContent>
           </Card>
 
@@ -665,7 +354,7 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
         <div className="flex min-w-0 flex-col gap-4">
           <Card>
             <CardHeader>
-              <CardTitle>{t().common.name}</CardTitle>
+              <CardTitle>{t().sales.orderDetails}</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-2 text-sm">
               <InfoRow label={t().sales.date} value={formatDateTime(detail.sale.createdAt, timezone, getLang())} />
@@ -715,7 +404,9 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
                 <MoneyRow label={t().sales.remaining} value={formatMoney(detail.remaining, currency, getLang())} bold />
               ) : null}
               <div className="mt-1 flex items-center justify-between border-t pt-2">
-                <span className="font-medium">{t().sales.profit}</span>
+                <span className="font-medium">
+                  {detail.remaining > 0 ? t().sales.expectedProfit : t().sales.profit}
+                </span>
                 <Badge variant="outline" className="tabular-nums">
                   {formatMoney(detail.profit, currency, getLang())}
                 </Badge>
@@ -798,44 +489,15 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
         </div>
       </div>
 
-      {/* Cancel confirm — flows unsold pieces back to stock */}
-      <AlertDialog open={cancelOpen} onOpenChange={setCancelOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t().sales.cancelConfirmTitle}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t().sales.cancelConfirmBody}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {detail.sale.deliveryFee > 0 ? (
-            <label className="flex items-start gap-3 rounded-md border p-3 text-sm">
-              <Checkbox
-                checked={keepShipping}
-                onCheckedChange={(checked) => setKeepShipping(checked === true)}
-                className="mt-0.5"
-              />
-              <span>
-                <span className="font-medium">
-                  {t().sales.keepShippingFee} (
-                  {formatMoney(detail.sale.deliveryFee, currency, getLang())})
-                </span>
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  {t().sales.keepShippingFeeHint}
-                </span>
-              </span>
-            </label>
-          ) : null}
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t().common.cancel}</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={changing}
-              onClick={() => void doSetStatus("cancelled")}
-            >
-              {t().sales.cancelOrder}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Guided cancellation — every held piece needs a physical outcome
+          before the order can be cancelled. */}
+      {cancelOpen ? (
+        <CancelSaleReviewDialog
+          saleId={detail.sale._id}
+          currency={currency}
+          onClose={() => setCancelOpen(false)}
+        />
+      ) : null}
 
       {/* Invoice re-print (T25 reuses the T10 dialog) */}
       {invoiceOpen ? (

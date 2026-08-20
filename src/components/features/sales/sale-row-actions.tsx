@@ -12,26 +12,14 @@ import {
   ViewIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useMutation, useQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { toast } from "sonner";
 
 import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -50,7 +38,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { useShop } from "@/hooks/use-shop";
-import { formatMoney, getLang, t, toastError } from "@/lib/utils";
+import { t } from "@/lib/utils";
+import { CancelSaleReviewDialog } from "./cancel-sale-review-dialog";
 import { InvoiceDialog } from "./invoice-dialog";
 import { SalePaymentDialog } from "./sale-payment-dialog";
 import { SalePaymentsDialog } from "./sale-payments-dialog";
@@ -84,30 +73,6 @@ export function SaleRowActions({ row }: { row: SaleListRow }) {
   const locked = status === "cancelled" || status === "draft";
   const canCancel = CAN_CANCEL.includes(status);
   const currency = shop?.currency ?? "USD";
-
-  const setStatus = useMutation(api.sales.setStatus);
-  const [cancelling, setCancelling] = useState(false);
-  // The package already went out and the customer refused it: the trip still
-  // costs money, so the shipping fee can stay owed on the cancelled order.
-  const [keepShipping, setKeepShipping] = useState(false);
-
-  async function doCancel() {
-    setCancelling(true);
-    try {
-      await setStatus({
-        saleId: sale._id,
-        status: "cancelled",
-        ...(keepShipping ? { chargeDeliveryFee: true } : {}),
-      });
-      toast.success(t().sales.statusUpdated);
-      setCancelOpen(false);
-      setKeepShipping(false);
-    } catch (err) {
-      toastError(err);
-    } finally {
-      setCancelling(false);
-    }
-  }
 
   return (
     <>
@@ -256,53 +221,16 @@ export function SaleRowActions({ row }: { row: SaleListRow }) {
         <InvoiceBranch saleId={sale._id} onClose={() => setActive(null)} />
       ) : null}
 
-      {/* Cancel confirm — cancel is forever (rule 10: sales are never
-          deletable), and any money already paid needs a separate refund. */}
-      <AlertDialog open={cancelOpen} onOpenChange={setCancelOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t().sales.cancelConfirmTitle}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t().sales.cancelConfirmBody}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {row.paid > 0 ? (
-            <p className="text-sm text-destructive">
-              {t().sales.cancelPaidHint.replace(
-                "{amount}",
-                formatMoney(row.paid, currency, getLang())
-              )}
-            </p>
-          ) : null}
-          {sale.deliveryFee > 0 ? (
-            <label className="flex items-start gap-3 rounded-md border p-3 text-sm">
-              <Checkbox
-                checked={keepShipping}
-                onCheckedChange={(checked) => setKeepShipping(checked === true)}
-                className="mt-0.5"
-              />
-              <span>
-                <span className="font-medium">
-                  {t().sales.keepShippingFee} (
-                  {formatMoney(sale.deliveryFee, currency, getLang())})
-                </span>
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  {t().sales.keepShippingFeeHint}
-                </span>
-              </span>
-            </label>
-          ) : null}
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t().common.cancel}</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={cancelling}
-              onClick={() => void doCancel()}
-            >
-              {t().sales.cancelSale}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Guided cancellation — cancel is forever (rule 10: sales are never
+          deletable). Every held piece needs a physical outcome first; the
+          review dialog also handles refunds and the charged trip fee. */}
+      {cancelOpen ? (
+        <CancelSaleReviewDialog
+          saleId={sale._id}
+          currency={currency}
+          onClose={() => setCancelOpen(false)}
+        />
+      ) : null}
     </>
   );
 }

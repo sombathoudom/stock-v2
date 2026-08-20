@@ -43,13 +43,17 @@ export const ALL_STATUSES: SaleStatus[] = [
 ];
 
 /** Orders with stock already out — cancelling flows unsold pieces back.
- * Pending orders are stock-out too (reserved at checkout). */
+ * Pending orders are stock-out too (reserved at checkout). Delivered orders
+ * may cancel through the guided review only: every held piece needs a
+ * physical outcome first (the server refuses with CANNOT_CANCEL_HELD
+ * otherwise). */
 export const CAN_CANCEL: SaleStatus[] = [
   "confirmed",
   "pending",
   "packed",
   "delivering",
   "partially_delivered",
+  "delivered",
 ];
 
 /** Action label for a forward step ("Mark packed" vs the plain status word). */

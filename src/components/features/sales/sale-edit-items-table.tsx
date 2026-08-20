@@ -132,8 +132,12 @@ export function lineSubtotal(line: EditLine): number {
  * What's wrong with this row, in shop language — or null when it's fine.
  * Client-side only: it stops a doomed save early and points at the row, but
  * the server checks all of it again and is the one that decides.
+ *
+ * `resolvedQty` is the pieces of this line already covered by pending
+ * return/correction resolutions — the floor shrinks by exactly that much,
+ * because the server applies the resolutions before it checks the floor.
  */
-export function lineError(line: EditLine): string | null {
+export function lineError(line: EditLine, resolvedQty = 0): string | null {
   if (line.removed) return null;
   const labels = t().sales.edit;
   const qty = lineQty(line);
@@ -141,7 +145,7 @@ export function lineError(line: EditLine): string | null {
   // The floor is what the customer currently holds — the historical
   // delivered count minus what already came back (the server checks the
   // same derived bound before applying the diff).
-  const held = line.qtyDelivered - line.qtyReturned;
+  const held = line.qtyDelivered - line.qtyReturned - resolvedQty;
   if (qty < held) {
     return labels.belowHeld.replace("{qty}", String(held));
   }
@@ -175,11 +179,19 @@ export function SaleEditItemsTable({
   onChange,
   currency,
   disabled,
+  resolvedQtyByLine,
+  onResolveLine,
 }: {
   lines: EditLine[];
   onChange: (next: EditLine[]) => void;
   currency: string;
   disabled: boolean;
+  /** Pending-resolution pieces per line key (returnable outcomes only —
+   * still_with_customer doesn't shrink the floor). */
+  resolvedQtyByLine: Record<string, number>;
+  /** A line whose pieces are held by the customer was asked to drop below
+   * the floor — the page opens the physical-outcome dialog for it. */
+  onResolveLine: (line: EditLine) => void;
 }) {
   const user = useCurrentUser();
   const labels = t().sales.edit;
@@ -247,10 +259,18 @@ export function SaleEditItemsTable({
 
   /** A row the user asked to drop. New rows just disappear (nothing of them
    * exists yet); saved rows are marked and confirmed, because removing one
-   * moves real stock when the page is saved. */
+   * moves real stock when the page is saved. A row whose pieces are still
+   * with the customer can't be silently removed — the resolution dialog
+   * captures what physically happened to those pieces instead. */
   function requestRemove(line: EditLine) {
     if (line.saleItemId === undefined) {
       onChange(lines.filter((l) => l.key !== line.key));
+      return;
+    }
+    const held =
+      line.qtyDelivered - line.qtyReturned - (resolvedQtyByLine[line.key] ?? 0);
+    if (held > 0) {
+      onResolveLine(line);
       return;
     }
     setPendingRemove(line);
@@ -351,8 +371,10 @@ export function SaleEditItemsTable({
               </TableRow>
             ) : (
               lines.map((line) => {
-                const error = lineError(line);
+                const resolved = resolvedQtyByLine[line.key] ?? 0;
+                const error = lineError(line, resolved);
                 const qty = lineQty(line) ?? 0;
+                const held = line.qtyDelivered - line.qtyReturned - resolved;
                 const left = Math.max(0, line.maxQty - qty);
                 return (
                   <TableRow
@@ -378,15 +400,28 @@ export function SaleEditItemsTable({
                             <Badge variant="destructive">{labels.removed}</Badge>
                           ) : null}
                         </span>
-                        {/* Row errors sit under the name, where the eye lands. */}
+                        {/* Row errors sit under the name, where the eye lands.
+                            A held-line floor violation offers the resolution
+                            dialog right there — staff never leave the page. */}
                         {error ? (
-                          <span className="text-xs text-destructive">{error}</span>
-                        ) : line.qtyDelivered - line.qtyReturned > 0 ? (
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-xs text-destructive">{error}</span>
+                            {held > 0 && qty < held ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => onResolveLine(line)}
+                                disabled={disabled}
+                                className="h-6 px-2 text-xs"
+                              >
+                                {labels.resolveLine}
+                              </Button>
+                            ) : null}
+                          </span>
+                        ) : held > 0 ? (
                           <span className="text-xs text-muted-foreground">
-                            {labels.heldLocked.replace(
-                              "{qty}",
-                              String(line.qtyDelivered - line.qtyReturned)
-                            )}
+                            {labels.heldLocked.replace("{qty}", String(held))}
                           </span>
                         ) : null}
                       </div>
@@ -488,8 +523,10 @@ export function SaleEditItemsTable({
           </p>
         ) : (
           lines.map((line) => {
-            const error = lineError(line);
+            const resolved = resolvedQtyByLine[line.key] ?? 0;
+            const error = lineError(line, resolved);
             const qty = lineQty(line) ?? 0;
+            const held = line.qtyDelivered - line.qtyReturned - resolved;
             const left = Math.max(0, line.maxQty - qty);
             return (
               <div
@@ -616,13 +653,24 @@ export function SaleEditItemsTable({
                   </span>
                 </div>
                 {error ? (
-                  <p className="mt-1 text-xs text-destructive">{error}</p>
-                ) : line.qtyDelivered - line.qtyReturned > 0 ? (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <p className="text-xs text-destructive">{error}</p>
+                    {held > 0 && qty < held ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onResolveLine(line)}
+                        disabled={disabled}
+                        className="h-7 px-2 text-xs"
+                      >
+                        {labels.resolveLine}
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : held > 0 ? (
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {labels.heldLocked.replace(
-                      "{qty}",
-                      String(line.qtyDelivered - line.qtyReturned)
-                    )}
+                    {labels.heldLocked.replace("{qty}", String(held))}
                   </p>
                 ) : null}
               </div>

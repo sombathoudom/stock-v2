@@ -7,7 +7,7 @@ import type { QueryCtx } from "./_generated/server";
 import { query } from "./_generated/server";
 import { getShop, requireUser } from "./helpers";
 import { dayRange } from "./sales";
-import { ledgerHistoryItem, ledgerReason, stockCsvRow, stockListItem } from "./types";
+import { ledgerHistoryItem, ledgerRangeSummary, ledgerReason, stockCsvRow, stockListItem } from "./types";
 
 // T6 — Stock (AGENTS.md). Stock is NEVER a stored number: every read here
 // sums the immutable stockLedger rows (rule #1). The list walks the product
@@ -62,7 +62,8 @@ export const list = query({
     total: v.number(),
   }),
   handler: async (ctx, args) => {
-    await requireUser(ctx);
+    const { staff } = await requireUser(ctx);
+    const showUnitCost = staff.role === "owner";
     const term = args.search?.trim().toLowerCase() ?? "";
     // Single-use query builders — a factory keeps page + total separate.
     const build = () =>
@@ -141,7 +142,8 @@ export const getProduct = query({
   args: { productId: v.id("products") },
   returns: v.union(stockListItem, v.null()),
   handler: async (ctx, args) => {
-    await requireUser(ctx);
+    const { staff } = await requireUser(ctx);
+    const showUnitCost = staff.role === "owner";
     const product = await ctx.db.get(args.productId);
     if (!product) return null;
     const variants = await ctx.db
@@ -172,24 +174,66 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const HISTORY_CAP = 1000;
 
 /** The order or purchase a ledger row belongs to — structured so the client
- * localizes "Order #1042" / "PO #208" through the labels module. Absent for
- * adjustments, stocktakes and rows without a linked document. */
+ * localizes "Order #1042" / "PO #208" through the labels module and links
+ * straight to the order/purchase detail (ids are the app's public route
+ * keys — Convex UUIDs, never enumerable numbers). Also carries the customer
+ * / channel / supplier names and, for purchases, the unit cost — the latter
+ * only for owners (staff never see costs). Absent for adjustments,
+ * stocktakes and rows without a linked document. */
 async function variantReference(
   ctx: { db: QueryCtx["db"] },
-  row: { saleItemId?: Id<"saleItems">; purchaseItemId?: Id<"purchaseItems"> }
-): Promise<{ kind: "order" | "po"; code: string } | undefined> {
+  row: { saleItemId?: Id<"saleItems">; purchaseItemId?: Id<"purchaseItems"> },
+  showUnitCost: boolean
+): Promise<
+  | {
+      kind: "order" | "po";
+      code: string;
+      saleId?: Id<"sales">;
+      purchaseId?: Id<"purchases">;
+      customerName?: string;
+      channelName?: string;
+      supplierName?: string;
+      unitCost?: number;
+    }
+  | undefined
+> {
   if (row.saleItemId !== undefined) {
     const item = await ctx.db.get(row.saleItemId);
     if (item) {
       const sale = await ctx.db.get(item.saleId);
-      if (sale) return { kind: "order", code: sale.code };
+      if (sale) {
+        const customer = sale.customerId
+          ? await ctx.db.get(sale.customerId)
+          : null;
+        const channel = sale.salesChannelId
+          ? await ctx.db.get(sale.salesChannelId)
+          : null;
+        return {
+          kind: "order",
+          code: sale.code,
+          saleId: sale._id,
+          ...(customer ? { customerName: customer.name } : {}),
+          ...(channel ? { channelName: channel.name } : {}),
+        };
+      }
     }
   }
   if (row.purchaseItemId !== undefined) {
     const item = await ctx.db.get(row.purchaseItemId);
     if (item) {
       const purchase = await ctx.db.get(item.purchaseId);
-      if (purchase) return { kind: "po", code: purchase.code };
+      if (purchase) {
+        const supplier = purchase.supplierId
+          ? await ctx.db.get(purchase.supplierId)
+          : null;
+        return {
+          kind: "po",
+          code: purchase.code,
+          purchaseId: purchase._id,
+          ...(supplier ? { supplierName: supplier.name } : {}),
+          ...(showUnitCost ? { unitCost: item.unitCost } : {}),
+        };
+      }
     }
   }
   return undefined;
@@ -207,9 +251,13 @@ export const variantHistory = query({
     page: v.array(ledgerHistoryItem),
     continueCursor: v.string(),
     total: v.number(),
+    // Range summary for the selected From/To window — derived from the
+    // immutable ledger on every read, never stored.
+    summary: ledgerRangeSummary,
   }),
   handler: async (ctx, args) => {
-    await requireUser(ctx);
+    const { staff } = await requireUser(ctx);
+    const showUnitCost = staff.role === "owner";
     if (args.fromDay !== undefined && !DAY_RE.test(args.fromDay)) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "Invalid day." });
     }
@@ -260,6 +308,33 @@ export const variantHistory = query({
     );
     const total = filtered.length;
 
+    // Range summary (spec formulas): opening = Σ deltas BEFORE the range
+    // start (0 when no From filter — an explicit imported opening movement
+    // would be the first `purchase` row); in/out = positive/negative sums
+    // INSIDE the time window; closing = opening + in − out. With no filters
+    // this reduces to closing = current ledger stock (in − out = Σ all).
+    let opening = 0;
+    if (fromMs !== undefined) {
+      for (const row of all) {
+        if (row.ts < fromMs) opening += row.delta;
+        else break; // newest-first walk: everything older sits below
+      }
+    }
+    let stockIn = 0;
+    let stockOut = 0;
+    for (const row of all) {
+      if (fromMs !== undefined && row.ts < fromMs) continue;
+      if (toMs !== undefined && row.ts >= toMs) continue;
+      if (row.delta > 0) stockIn += row.delta;
+      else stockOut += -row.delta;
+    }
+    const summary = {
+      opening,
+      in: stockIn,
+      out: stockOut,
+      closing: opening + stockIn - stockOut,
+    };
+
     // Filter first, then page by offset. Drift on concurrent inserts
     // self-corrects on the next filter change / reload (same trade-off the
     // POS size-filter path documents).
@@ -279,7 +354,7 @@ export const variantHistory = query({
 
     const page = await Promise.all(
       pageRows.map(async (row) => {
-        const reference = await variantReference(ctx, row);
+        const reference = await variantReference(ctx, row, showUnitCost);
         return {
           row,
           userName: nameById.get(row.userId) ?? "—",
@@ -288,6 +363,6 @@ export const variantHistory = query({
         };
       })
     );
-    return { page, continueCursor, total };
+    return { page, continueCursor, total, summary };
   },
 });
