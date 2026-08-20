@@ -1,0 +1,29 @@
+{
+  /* This TypeScript project config describes the environment that
+   * Convex functions run in and is used to typecheck them.
+   * You can modify it, but some settings required to use Convex.
+   */
+  "compilerOptions": {
+    /* These settings are not required by Convex and can be modified. */
+    "allowJs": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react",
+
+    /* These compiler options are required by Convex */
+    "target": "ESNext",
+    "lib": ["ES2021", "dom", "ESNext.Array", "DOM.Iterable"],
+    "forceConsistentCasingInFileNames": true,
+    "allowSyntheticDefaultImports": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "isolatedModules": true,
+    "noEmit": true
+  },
+  "include": ["./**/*"],
+  /* Test files are Vitest's, not the Convex runtime's: they use
+   * `import.meta.glob`, which this config has no types for, and a failure
+   * here blocks every `convex dev` push. They are still typechecked by the
+   * root tsconfig and run by `npm test`. */
+  "exclude": ["./_generated", "./**/*.test.ts"]
+}
