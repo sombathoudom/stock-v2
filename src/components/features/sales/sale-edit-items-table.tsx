@@ -71,10 +71,24 @@ export type EditLine = {
   /** Pieces that came back. The floor this line can't go under is the
    * derived difference (invariant 6): delivered − returned. */
   qtyReturned: number;
-  /** Highest this line can be raised to: its own billed pieces + shelf stock. */
+  /** Current database stock of this variant (ledger sum, from the server).
+   * Same value on every line of the variant — the base of the shared stock
+   * projection, never displayed raw. */
+  stock: number;
+  /** Highest this line can be raised to: its own billed pieces + shelf stock.
+   * Drives the "Available stock" column — the real shelf the staff can see. */
   maxQty: number;
+  /** Hard cap for the quantity box. Same as maxQty, except on a delivered
+   * order a held line is final: it can only shrink through the resolution
+   * flow, never grow — extra pieces come in as NEW lines. The column above
+   * still shows the real shelf; only the input is capped. */
+  inputMax: number;
   /** Marked for removal — applied (and returned to stock) on save. */
   removed: boolean;
+  /** What happened to the pieces that came back (from the ledger): a line
+   * removed by a return says "Returned · Sellable" / "Returned · Damaged"
+   * instead of the generic "Removed". null = no return history. */
+  returnedOutcome: "sellable" | "damaged" | null;
 };
 
 /** Product photo thumbnail — the product's picture when it has one, a muted
@@ -136,8 +150,18 @@ export function lineSubtotal(line: EditLine): number {
  * `resolvedQty` is the pieces of this line already covered by pending
  * return/correction resolutions — the floor shrinks by exactly that much,
  * because the server applies the resolutions before it checks the floor.
+ *
+ * `availability` is the shared variant-level projection (projectAvailability)
+ * — the SAME numbers the Available stock column renders, so the validation
+ * error and the displayed stock can never disagree. The one extra bound is
+ * `inputMax` on a delivered order: existing lines are final there and can
+ * never be raised (the server refuses it too).
  */
-export function lineError(line: EditLine, resolvedQty = 0): string | null {
+export function lineError(
+  line: EditLine,
+  resolvedQty = 0,
+  availability?: ReadonlyMap<string, VariantAvailability>
+): string | null {
   if (line.removed) return null;
   const labels = t().sales.edit;
   const qty = lineQty(line);
@@ -149,8 +173,16 @@ export function lineError(line: EditLine, resolvedQty = 0): string | null {
   if (qty < held) {
     return labels.belowHeld.replace("{qty}", String(held));
   }
-  if (qty > line.maxQty) {
-    return labels.notEnoughStock.replace("{qty}", String(line.maxQty));
+  // Aggregate stock check, per variant: every line of the variant shares one
+  // projection, so duplicate lines can't each draw the full shelf.
+  if (availability !== undefined) {
+    const available = availableForLine(line, availability);
+    if (qty > available) {
+      return labels.notEnoughStock.replace("{qty}", String(available));
+    }
+  }
+  if (qty > line.inputMax) {
+    return labels.notEnoughStock.replace("{qty}", String(line.inputMax));
   }
   const price = linePrice(line);
   if (price == null) return labels.priceRequired;
@@ -174,6 +206,111 @@ export function lineChanged(line: EditLine): boolean {
   );
 }
 
+/** One variant's projected stock, shared by the Available stock column and
+ * the quantity validation — one source, so the number displayed and the
+ * number enforced can never disagree (they used to: the column read the real
+ * shelf while the error read a per-line cap, and a restored historical
+ * return showed "8" next to "Only 0 available"). */
+export type VariantAvailability = {
+  /** Stock available NOW: current database stock. Pending returns aren't
+   * saved yet, so they don't move this number — the "+X when saved"
+   * description covers them. */
+  shelf: number;
+  /** Projected stock AFTER this save: current stock + the save's net
+   * movements (pending returns in, reduced lines back, grown/new lines
+   * drawn) — the same per-variant net the server's assertStockCovers
+   * validates. A persisted return contributes 0: its piece is already
+   * inside `shelf`. */
+  after: number;
+};
+
+/**
+ * The ONE stock projection for the Edit Sale page, per variant.
+ *
+ *   shelf = current database stock
+ *   net   = Σ per line: returnIn (pending sellable returns / corrections)
+ *           + billedAfter − activeQty (a reduced line sends the difference
+ *           back; a grown/new line draws it — the same per-line net the
+ *           server's saveEdit computes as returnIn + billedOld − qty)
+ *   after = shelf + net
+ *
+ * A PERSISTED return is already inside current database stock (its return
+ * movement landed) and its line bills nothing: it adds to neither the
+ * pending-return count nor the drawn quantity, so reloading the page never
+ * double-counts it. `returnInByLine` / `billCutByLine` are keyed by line
+ * key and carry the pending-resolution quantities: what flows back in
+ * (sellable returns + delivery corrections) and what drops off the bill
+ * (every return outcome — damaged pieces leave the bill without adding
+ * stock). `stock` on each line is the variant's current ledger stock (the
+ * same for every line of the variant).
+ */
+export function projectAvailability(
+  lines: EditLine[],
+  returnInByLine: ReadonlyMap<string, number>,
+  billCutByLine: ReadonlyMap<string, number>
+): Map<string, VariantAvailability> {
+  const byVariant = new Map<string, { db: number; net: number }>();
+  for (const line of lines) {
+    const cur = byVariant.get(line.variantId) ?? { db: 0, net: 0 };
+    // Same variant stock on every line; max guards a stale search-result
+    // race against the loaded edit snapshot (the server re-validates anyway).
+    cur.db = Math.max(cur.db, line.stock);
+    const returnIn = returnInByLine.get(line.key) ?? 0;
+    const billCut = billCutByLine.get(line.key) ?? 0;
+    // What the line keeps billing after the pending returns — the pieces
+    // this save does NOT take out again (they left the shelf long ago).
+    const billedAfter = Math.max(0, line.originalQty - billCut);
+    // What the line asks for now. Removed lines bill nothing; an unparsable
+    // quantity is an error row anyway and takes nothing for the projection.
+    const activeQty = line.removed ? 0 : (lineQty(line) ?? 0);
+    // This line's net movement on save: returns flow in, a reduced line
+    // gives the difference back, a grown/new line draws it. Mirrors the
+    // server's per-variant net (assertStockCovers runs on the same number).
+    cur.net += returnIn + billedAfter - activeQty;
+    byVariant.set(line.variantId, cur);
+  }
+  const out = new Map<string, VariantAvailability>();
+  for (const [variantId, v] of byVariant) {
+    out.set(variantId, { shelf: v.db, after: v.db + v.net });
+  }
+  return out;
+}
+
+/** What THIS line can still take before its variant's projected stock runs
+ * out — the other lines of the same variant already reserve their share, so
+ * duplicate lines each see the remaining shelf, never the full number. The
+ * line's own request is added back because `after` already excludes it. */
+export function availableForLine(
+  line: EditLine,
+  availability: ReadonlyMap<string, VariantAvailability>
+): number {
+  const v = availability.get(line.variantId);
+  if (!v) return line.inputMax;
+  const activeQty = line.removed ? 0 : (lineQty(line) ?? 0);
+  return Math.max(0, v.after + activeQty);
+}
+
+/** What a REMOVED row offers the user — the pending/persisted distinction,
+ * derived from server data (returnedOutcome) and pending form state, never
+ * from styling. A persisted return is immutable history; only pending
+ * client-side actions are undoable. */
+export type RemovedLineState =
+  | "readonly" // persisted return: history, no Undo, no delete
+  | "undo-resolution" // pending return: Undo pops the pending resolution
+  | "undo" // pending removal / cancelled history: plain Undo
+  | "none"; // cancelled history on a delivered order (server refuses it)
+
+export function removedLineState(
+  line: EditLine,
+  delivered: boolean,
+  pendingOutcome?: "sellable" | "damaged" | "incorrect"
+): RemovedLineState {
+  if (line.returnedOutcome != null) return "readonly";
+  if (pendingOutcome != null) return "undo-resolution";
+  if (delivered) return "none";
+  return "undo";
+}
+
 export function SaleEditItemsTable({
   lines,
   onChange,
@@ -181,17 +318,40 @@ export function SaleEditItemsTable({
   disabled,
   resolvedQtyByLine,
   onResolveLine,
+  delivered,
+  availabilityByVariant,
+  pendingOutcomeByLine,
+  onUndoResolution,
 }: {
   lines: EditLine[];
   onChange: (next: EditLine[]) => void;
   currency: string;
   disabled: boolean;
+  /** True when the order is delivered: existing lines are final — the
+   * server refuses any billed-qty change (DELIVERED_LOCKED_LINES), so a
+   * cancelled-history line is not offered an Undo here (restoring one would
+   * be a guaranteed refusal). New items come in through the add-item search. */
+  delivered: boolean;
   /** Pending-resolution pieces per line key (returnable outcomes only —
    * still_with_customer doesn't shrink the floor). */
   resolvedQtyByLine: Record<string, number>;
   /** A line whose pieces are held by the customer was asked to drop below
    * the floor — the page opens the physical-outcome dialog for it. */
   onResolveLine: (line: EditLine) => void;
+  /** The shared per-variant stock projection — the one source for the
+   * Available stock column and the quantity validation (lineError). */
+  availabilityByVariant: ReadonlyMap<string, VariantAvailability>;
+  /** Pending (unsaved) return per line key, from the change summary —
+   * outcome "sellable" when a sellable return or delivery correction is
+   * pending on the line, "damaged" for a damaged return; qty is the pieces
+   * the save will bring back in. */
+  pendingOutcomeByLine: Record<
+    string,
+    { outcome: "sellable" | "damaged" | "incorrect"; qty: number }
+  >;
+  /** Undo the line's MOST RECENT pending resolution (returns the line to
+   * its pre-resolution state; nothing is written until Save). */
+  onUndoResolution: (line: EditLine) => void;
 }) {
   const user = useCurrentUser();
   const labels = t().sales.edit;
@@ -251,8 +411,11 @@ export function SaleEditItemsTable({
         originalDiscount: 0,
         qtyReturned: 0,
         qtyDelivered: 0,
+        stock: found.stock,
         maxQty: found.stock,
+        inputMax: found.stock,
         removed: false,
+        returnedOutcome: null,
       },
     ]);
   }
@@ -278,7 +441,12 @@ export function SaleEditItemsTable({
 
   /** Put a removed row back on the bill. A row that was already billing
    * nothing when the page opened comes back at one piece — restoring it to
-   * zero would just be an invalid row the user has to fix. */
+   * zero would just be an invalid row the user has to fix.
+   *
+   * Not offered on delivered orders: there the server refuses any change to
+   * an existing (already-billed) line (DELIVERED_LOCKED_LINES), so the Undo
+   * button is hidden and removed lines read as history — new pieces come in
+   * through the add-item search instead. */
   function restoreLine(line: EditLine) {
     const qty = lineQty(line);
     patchLine(line.key, {
@@ -288,6 +456,25 @@ export function SaleEditItemsTable({
   }
 
   const itemsSubtotal = lines.reduce((sum, l) => sum + lineSubtotal(l), 0);
+
+  /** Everything one row needs to render — shared by the desktop table and
+   * the phone cards so the two can never drift. */
+  function rowView(line: EditLine) {
+    const resolved = resolvedQtyByLine[line.key] ?? 0;
+    const error = lineError(line, resolved, availabilityByVariant);
+    const qty = lineQty(line) ?? 0;
+    const held = line.qtyDelivered - line.qtyReturned - resolved;
+    const variant = availabilityByVariant.get(line.variantId);
+    // Same projection the validation uses — the column can never show a
+    // number the qty check disagrees with.
+    const shelf = variant?.shelf ?? line.stock;
+    const after = variant?.after ?? line.stock;
+    const pending = pendingOutcomeByLine[line.key];
+    const removedAction = line.removed
+      ? removedLineState(line, delivered, pending?.outcome)
+      : null;
+    return { error, qty, held, shelf, after, pending, removedAction };
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -371,11 +558,8 @@ export function SaleEditItemsTable({
               </TableRow>
             ) : (
               lines.map((line) => {
-                const resolved = resolvedQtyByLine[line.key] ?? 0;
-                const error = lineError(line, resolved);
-                const qty = lineQty(line) ?? 0;
-                const held = line.qtyDelivered - line.qtyReturned - resolved;
-                const left = Math.max(0, line.maxQty - qty);
+                const { error, qty, held, shelf, after, pending, removedAction } =
+                  rowView(line);
                 return (
                   <TableRow
                     key={line.key}
@@ -397,7 +581,26 @@ export function SaleEditItemsTable({
                             <Badge variant="info">{labels.newLine}</Badge>
                           ) : null}
                           {line.removed ? (
-                            <Badge variant="destructive">{labels.removed}</Badge>
+                            <Badge
+                              variant={
+                                (line.returnedOutcome ?? pending?.outcome) ===
+                                "damaged"
+                                  ? "destructive"
+                                  : "info"
+                              }
+                            >
+                              {line.returnedOutcome != null
+                                ? line.returnedOutcome === "sellable"
+                                  ? labels.returnedSellable
+                                  : labels.returnedDamaged
+                                : pending
+                                  ? pending.outcome === "sellable"
+                                    ? labels.pendingReturnSellable
+                                    : pending.outcome === "damaged"
+                                      ? labels.pendingReturnDamaged
+                                      : labels.removed
+                                  : labels.removed}
+                            </Badge>
                           ) : null}
                         </span>
                         {/* Row errors sit under the name, where the eye lands.
@@ -423,6 +626,20 @@ export function SaleEditItemsTable({
                           <span className="text-xs text-muted-foreground">
                             {labels.heldLocked.replace("{qty}", String(held))}
                           </span>
+                        ) : line.removed ? (
+                          line.returnedOutcome != null ? (
+                            // Persisted return — history, not a row to fix.
+                            <span className="text-xs text-muted-foreground">
+                              {labels.historicalReturn}
+                            </span>
+                          ) : pending?.outcome === "sellable" ? (
+                            <span className="text-xs text-muted-foreground">
+                              {labels.pendingReturnStockIn.replace(
+                                "{qty}",
+                                String(pending.qty)
+                              )}
+                            </span>
+                          ) : null
                         ) : null}
                       </div>
                     </TableCell>
@@ -445,7 +662,9 @@ export function SaleEditItemsTable({
                       />
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-muted-foreground">
-                      {left}
+                      {after === shelf
+                        ? shelf
+                        : `${shelf} → ${Math.max(0, after)}`}
                     </TableCell>
                     <TableCell>
                       <Input
@@ -476,20 +695,39 @@ export function SaleEditItemsTable({
                     </TableCell>
                     <TableCell className="text-right">
                       {line.removed ? (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => restoreLine(line)}
-                          disabled={disabled}
-                          aria-label={labels.undo}
-                        >
-                          <HugeiconsIcon
-                            icon={Undo02Icon}
-                            strokeWidth={2}
-                            className="size-4"
-                          />
-                        </Button>
+                        removedAction === "undo-resolution" ? (
+                          // Pending return — Undo pops the not-yet-saved
+                          // resolution; nothing touches the database.
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => onUndoResolution(line)}
+                            disabled={disabled}
+                            aria-label={labels.undo}
+                          >
+                            <HugeiconsIcon
+                              icon={Undo02Icon}
+                              strokeWidth={2}
+                              className="size-4"
+                            />
+                          </Button>
+                        ) : removedAction === "undo" ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => restoreLine(line)}
+                            disabled={disabled}
+                            aria-label={labels.undo}
+                          >
+                            <HugeiconsIcon
+                              icon={Undo02Icon}
+                              strokeWidth={2}
+                              className="size-4"
+                            />
+                          </Button>
+                        ) : null
                       ) : (
                         <Button
                           type="button"
@@ -523,11 +761,8 @@ export function SaleEditItemsTable({
           </p>
         ) : (
           lines.map((line) => {
-            const resolved = resolvedQtyByLine[line.key] ?? 0;
-            const error = lineError(line, resolved);
-            const qty = lineQty(line) ?? 0;
-            const held = line.qtyDelivered - line.qtyReturned - resolved;
-            const left = Math.max(0, line.maxQty - qty);
+            const { error, qty, held, shelf, after, pending, removedAction } =
+              rowView(line);
             return (
               <div
                 key={line.key}
@@ -559,20 +794,59 @@ export function SaleEditItemsTable({
                       <Badge variant="info">{labels.newLine}</Badge>
                     ) : null}
                     {line.removed ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => restoreLine(line)}
-                        disabled={disabled}
-                        aria-label={labels.undo}
+                      <Badge
+                        variant={
+                          (line.returnedOutcome ?? pending?.outcome) ===
+                          "damaged"
+                            ? "destructive"
+                            : "info"
+                        }
                       >
-                        <HugeiconsIcon
-                          icon={Undo02Icon}
-                          strokeWidth={2}
-                          className="size-4"
-                        />
-                      </Button>
+                        {line.returnedOutcome != null
+                          ? line.returnedOutcome === "sellable"
+                            ? labels.returnedSellable
+                            : labels.returnedDamaged
+                          : pending
+                            ? pending.outcome === "sellable"
+                              ? labels.pendingReturnSellable
+                              : pending.outcome === "damaged"
+                                ? labels.pendingReturnDamaged
+                                : labels.removed
+                            : labels.removed}
+                      </Badge>
+                    ) : null}
+                    {line.removed ? (
+                      removedAction === "undo-resolution" ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onUndoResolution(line)}
+                          disabled={disabled}
+                          aria-label={labels.undo}
+                        >
+                          <HugeiconsIcon
+                            icon={Undo02Icon}
+                            strokeWidth={2}
+                            className="size-4"
+                          />
+                        </Button>
+                      ) : removedAction === "undo" ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => restoreLine(line)}
+                          disabled={disabled}
+                          aria-label={labels.undo}
+                        >
+                          <HugeiconsIcon
+                            icon={Undo02Icon}
+                            strokeWidth={2}
+                            className="size-4"
+                          />
+                        </Button>
+                      ) : null
                     ) : (
                       <Button
                         type="button"
@@ -640,7 +914,9 @@ export function SaleEditItemsTable({
                       {labels.colStock}
                     </span>
                     <span className="flex h-11 items-center justify-end tabular-nums">
-                      {left}
+                      {after === shelf
+                        ? shelf
+                        : `${shelf} → ${Math.max(0, after)}`}
                     </span>
                   </div>
                 </div>
@@ -672,6 +948,19 @@ export function SaleEditItemsTable({
                   <p className="mt-1 text-xs text-muted-foreground">
                     {labels.heldLocked.replace("{qty}", String(held))}
                   </p>
+                ) : line.removed ? (
+                  line.returnedOutcome != null ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {labels.historicalReturn}
+                    </p>
+                  ) : pending?.outcome === "sellable" ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {labels.pendingReturnStockIn.replace(
+                        "{qty}",
+                        String(pending.qty)
+                      )}
+                    </p>
+                  ) : null
                 ) : null}
               </div>
             );

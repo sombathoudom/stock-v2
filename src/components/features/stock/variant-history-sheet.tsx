@@ -234,7 +234,17 @@ export function VariantHistorySheet({
     [groups, groupOrder]
   );
   const hasDateFilter = fromDay !== "" || toDay !== "";
-  const mismatch = integrityMismatch(rows, variant?.stock ?? 0, hasDateFilter);
+  // The integrity check only speaks on the COMPLETE unfiltered stream — a
+  // reason filter or a paginated subset legitimately shows an older
+  // after-balance next to the current total (e.g. "Stock out" hides the
+  // returns that landed after the last sale).
+  const mismatch = integrityMismatch(
+    rows,
+    variant?.stock ?? 0,
+    hasDateFilter,
+    reason !== "all",
+    rows.length >= total
+  );
   const hasFilters =
     fromDay !== "" ||
     toDay !== "" ||

@@ -852,11 +852,17 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       saleId: sale.sale._id,
       returns: [{ saleItemId: sale.items[0].item._id, qty: 1 }],
     });
+    // Each event rides its own mutation's timestamp; two mutations landing
+    // in the same millisecond make the harness's index tie-break (reverse
+    // insertion) disagree with production (insertion order) and the event
+    // sequence flakes. A 2ms gap makes the order deterministic everywhere.
+    await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.receive, {
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
     });
+    await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.refund, {
       saleId: sale.sale._id,
       amount: 500,
@@ -916,11 +922,16 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
         qty: 2,
       },
     ]);
+    // Same 2ms gaps as above: each event rides its own mutation's
+    // timestamp, and the edit's events sit on now+2..now+4, so a payment
+    // starting in the same millisecond could sort before them.
+    await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.receive, {
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
     });
+    await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.refund, {
       saleId: sale.sale._id,
       amount: 500,
@@ -949,5 +960,724 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       },
       version: 1,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Delivered-order edit (the real shop scenario): an order is delivered; the
+// customer comes back to change a shirt's size and buys more; staff does it
+// ALL on the ONE Edit Sale page — return held pieces (resolution dialog) and
+// add new items (the Add-an-item search), each new item with its fulfillment
+// ("Handed to customer now" / "Deliver later"), reviewed and saved once.
+// The 22 scenarios below pin the server contract of that single save.
+// ---------------------------------------------------------------------------
+
+/**
+ * A delivered order through the real flows: checkout, then setStatus
+ * (fillAllDelivered books every outstanding piece; the checkout already
+ * deducted stock). A 2ms pause guarantees the deliver event lands on its own
+ * millisecond — same-ms ties across transactions order arbitrarily in the
+ * events index (the known race of the two pre-existing flaky tests).
+ */
+async function deliver(
+  t: ReturnType<typeof convexTest>,
+  ids: SeedIds,
+  lines: { variantId: Id<"productVariants">; qty: number }[],
+  extra: { deliveryFee?: number } = {}
+) {
+  const sale = await checkout(t, ids, lines, extra);
+  await t.mutation(api.sales.setStatus, {
+    saleId: sale.sale._id,
+    status: "delivered",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  return sale;
+}
+
+describe("delivered-order edit (returns + new items, one save)", () => {
+  test("1. return the old size and add the new size in one save", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      // The returned piece's line falls to its post-resolution billed qty;
+      // the replacement is a NEW line — exactly what the page sends.
+      items: [
+        { saleItemId: line._id, qty: 1 },
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+    });
+
+    expect(after.sale.status).toBe("delivered"); // handed now → stays delivered
+    expect(after.items).toHaveLength(2);
+    const [oldLine, newLine] = after.items;
+    expect(oldLine.item.qtyOrdered).toBe(2); // history never shrinks
+    expect(oldLine.item.qtyDelivered).toBe(2);
+    expect(oldLine.item.qtyReturned).toBe(1);
+    expect(newLine.item.qtyOrdered).toBe(1); // the new line is fully handed over
+    expect(newLine.item.qtyDelivered).toBe(1);
+    await verifyMatrix(t, ids, "1. return old size + add new size", before, {
+      operation: "delivered teeM ×2 → return 1 sellable + add teeL ×1 handed now",
+      saleId: sale.sale._id,
+      stock: { teeM: 9, teeL: 9 }, // 10−2+1; 10−1
+      ledger: {
+        teeM: "purchase +10, sale -2, return +1", // exactly ONE stock-in row
+        teeL: "purchase +10, sale -1", // the new line deducts exactly once
+      },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed", "items_returned", "item_added"],
+      snapshots: [400, 400],
+      version: 1,
+    });
+  });
+
+  test("2. return one shirt and add two more shirts", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { saleItemId: line._id, qty: 1 },
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+        { variantId: ids.shirtBlack, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+    });
+
+    await verifyMatrix(t, ids, "2. return + two extra shirts", before, {
+      operation: "delivered teeM ×2 → return 1 + add teeL and shirtBlack",
+      saleId: sale.sale._id,
+      stock: { teeM: 9, teeL: 9, shirtBlack: 9 },
+      ledger: {
+        teeM: "purchase +10, sale -2, return +1",
+        teeL: "purchase +10, sale -1",
+        shirtBlack: "purchase +10, sale -1",
+      },
+      detail: { total: 3500, paid: 0, remaining: 3500, profit: 2200 },
+      events: [
+        "created",
+        "status_changed",
+        "items_returned",
+        "item_added",
+        "item_added",
+      ],
+      snapshots: [400, 400, 500],
+      version: 1,
+    });
+  });
+
+  test("3. the same replacement variant twice stays two separate lines", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { saleItemId: line._id, qty: 1 },
+        { variantId: ids.teeM, qty: 1, fulfillment: "handed_now" },
+        { variantId: ids.teeM, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+    });
+
+    expect(after.items).toHaveLength(3); // never merged
+    await verifyMatrix(t, ids, "3. same variant twice", before, {
+      operation: "two separate new teeM lines on the same delivered order",
+      saleId: sale.sale._id,
+      stock: { teeM: 7 }, // 10 − 2 + 1 − 1 − 1
+      ledger: { teeM: "purchase +10, sale -2, return +1, sale -1, sale -1" },
+      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+      events: [
+        "created",
+        "status_changed",
+        "items_returned",
+        "item_added",
+        "item_added",
+      ],
+      snapshots: [400, 400, 400],
+      version: 1,
+    });
+  });
+
+  test("4. a sellable return adds stock exactly once", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const line = sale.items[0].item;
+
+    await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ saleItemId: line._id, qty: 1 }],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+    });
+
+    const rows = await ledgerRows(t, ids.teeM);
+    const returnRows = rows.filter((r) => r.reason === "return");
+    expect(returnRows).toHaveLength(1); // one row, never two
+    expect(returnRows[0].delta).toBe(1);
+    expect(await stockOf(t, ids.teeM)).toBe(9);
+  });
+
+  test("5. a damaged return does not increase sellable stock", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ saleItemId: line._id, qty: 1 }],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_damaged", qty: 1 }],
+    });
+
+    await verifyMatrix(t, ids, "5. damaged return", before, {
+      operation: "1 piece returned damaged — return +1, adjustment −1, net 0",
+      saleId: sale.sale._id,
+      stock: { teeM: 8 },
+      ledger: { teeM: "purchase +10, sale -2, return +1, adjustment -1" },
+      detail: { total: 1000, paid: 0, remaining: 1000, profit: 600 },
+      events: ["created", "status_changed", "items_returned"],
+      snapshots: [400],
+      version: 1,
+    });
+  });
+
+  test("6. still-with-customer leaves stock and bill untouched", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ saleItemId: line._id, qty: 2 }], // nothing changed
+      resolutions: [
+        { saleItemId: line._id, outcome: "still_with_customer", qty: 1 },
+      ],
+    });
+
+    expect(after.items[0].item.qtyReturned).toBe(0); // nothing happened
+    await verifyMatrix(t, ids, "6. still with customer", before, {
+      operation: "1 piece resolved still_with_customer — no rows at all",
+      saleId: sale.sale._id,
+      stock: { teeM: 8 },
+      ledger: { teeM: "purchase +10, sale -2" },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed"],
+      snapshots: [400],
+      version: 1, // every save still bumps the stale-edit counter
+    });
+  });
+
+  test("7. an undone pending resolution changes nothing", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    // The resolution was collected, then UNDONE before Save — so the save
+    // ships without it (Undo is client state; the server only ever sees what
+    // the page sends).
+    await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ saleItemId: line._id, qty: 2 }],
+    });
+
+    await verifyMatrix(t, ids, "7. undone resolution", before, {
+      operation: "the same save WITHOUT the resolution — nothing moves",
+      saleId: sale.sale._id,
+      stock: { teeM: 8 },
+      ledger: { teeM: "purchase +10, sale -2" },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed"],
+      snapshots: [400],
+      version: 1,
+    });
+  });
+
+  test("8. new items handed now: delivered, stock out once, status kept", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+
+    // The fulfillment choice is REQUIRED on a delivered order — a new line
+    // without it is refused and writes nothing.
+    const missing = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        items: [{ variantId: ids.teeL, qty: 1 }],
+      })
+    );
+    expect(missing).toBe("INVALID_INPUT");
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
+    });
+
+    expect(after.sale.status).toBe("delivered");
+    expect(after.items).toHaveLength(2);
+    expect(after.items[1].item.qtyOrdered).toBe(1);
+    expect(after.items[1].item.qtyDelivered).toBe(1); // handed over now
+    expect(after.items[1].item.qtyReturned).toBe(0);
+    expect(await ledgerSummary(t, ids.teeL)).toBe("purchase +10, sale -1");
+  });
+
+  test("9. new items delivered later: waiting line, order partially delivered", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "deliver_later" }],
+    });
+
+    expect(after.sale.status).toBe("partially_delivered");
+    expect(after.items[1].item.qtyOrdered).toBe(1);
+    expect(after.items[1].item.qtyDelivered).toBe(0); // waits for the second trip
+    await verifyMatrix(t, ids, "9. deliver later", before, {
+      operation: "delivered order + new teeL ×1 going out later",
+      saleId: sale.sale._id,
+      stock: { teeL: 9 }, // reserved exactly once, like any confirmed-sale line
+      ledger: { teeL: "purchase +10, sale -1" },
+      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+      events: [
+        "created",
+        "status_changed",
+        "item_added",
+        "status_changed", // delivered → partially_delivered
+      ],
+      snapshots: [400, 400],
+      version: 1,
+    });
+  });
+
+  test("10. handed-now keeps the order Delivered — status is never re-opened", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
+    });
+
+    expect(after.sale.status).toBe("delivered");
+    await verifyMatrix(t, ids, "10. handed now keeps delivered", before, {
+      operation: "delivered order + handed-now line — status untouched",
+      saleId: sale.sale._id,
+      stock: { teeL: 9 },
+      ledger: { teeL: "purchase +10, sale -1" },
+      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+      events: ["created", "status_changed", "item_added"],
+      version: 1,
+    });
+  });
+
+  test("11. mixed outcomes: any deliver-later makes the order partially delivered", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+        { variantId: ids.shirtBlack, qty: 1, fulfillment: "deliver_later" },
+      ],
+    });
+
+    expect(after.sale.status).toBe("partially_delivered");
+    expect(after.items[1].item.qtyDelivered).toBe(1); // handed now: delivered
+    expect(after.items[2].item.qtyDelivered).toBe(0); // later: waiting
+  });
+
+  test("12. equal-price replacement: total unchanged", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const line = sale.items[0].item;
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { saleItemId: line._id, qty: 1 },
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+    });
+
+    expect(after.total).toBe(2000); // $10 removed, $10 added — same bill
+  });
+
+  test("13. more-expensive replacement: total and profit re-derive", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { saleItemId: line._id, qty: 1 },
+        { variantId: ids.shirtBlack, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+    });
+
+    await verifyMatrix(t, ids, "13. more-expensive replacement", before, {
+      operation: "delivered teeM ×2 → return 1 + add shirtBlack ×1 ($15)",
+      saleId: sale.sale._id,
+      stock: { teeM: 9, shirtBlack: 9 },
+      ledger: {
+        teeM: "purchase +10, sale -2, return +1",
+        shirtBlack: "purchase +10, sale -1",
+      },
+      detail: { total: 2500, paid: 0, remaining: 2500, profit: 1600 },
+      events: ["created", "status_changed", "items_returned", "item_added"],
+      snapshots: [400, 500],
+      version: 1,
+    });
+  });
+
+  test("14. cheaper replacement shows refund due but never refunds automatically", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const line = sale.items[0].item;
+    await t.mutation(api.payments.receive, {
+      saleId: sale.sale._id,
+      amount: 2000,
+      method: "cash",
+    });
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { saleItemId: line._id, qty: 0 },
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 2 }],
+    });
+
+    // The bill drops below what was paid — but no refund row is written;
+    // the staff member refunds explicitly (or not). Money out is always a
+    // conscious act (AGENTS.md rule #2).
+    expect(after.total).toBe(1000);
+    expect(after.paid).toBe(2000);
+    expect(after.remaining).toBe(0); // overpaid $10, remaining clamps to 0
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("payments")
+        .withIndex("by_sale", (q) => q.eq("saleId", sale.sale._id))
+        .collect()
+    );
+    expect(rows).toHaveLength(1); // only the original payment — no refund
+    expect(rows.every((r) => r.amount > 0 && r.method !== "refund")).toBe(true);
+  });
+
+  test("15. a second trip can charge an extra shipping fee in the same save", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "deliver_later" }],
+      deliveryFee: 300, // the extra trip bills the customer
+    });
+
+    expect(after.sale.deliveryFee).toBe(300);
+    await verifyMatrix(t, ids, "15. extra shipping for the second trip", before, {
+      operation: "deliver-later line + deliveryFee 0 → 300 in the SAME save",
+      saleId: sale.sale._id,
+      stock: { teeL: 9 },
+      ledger: { teeL: "purchase +10, sale -1" }, // the fee moves no stock
+      detail: { total: 3300, paid: 0, remaining: 3300, profit: 2100 },
+      events: [
+        "created",
+        "status_changed",
+        "item_added",
+        "sale_edited", // the fee edit, audited
+        "status_changed", // delivered → partially_delivered
+      ],
+      version: 1,
+    });
+  });
+
+  test("16. duplicate lines overselling together are rejected", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+
+    // Each line alone fits (teeL shelf is 10), together they don't (net 12
+    // > 10) — the aggregate stock check must catch the pair.
+    const code = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        items: [
+          { variantId: ids.teeL, qty: 6, fulfillment: "handed_now" },
+          { variantId: ids.teeL, qty: 6, fulfillment: "handed_now" },
+        ],
+      })
+    );
+    expect(code).toBe("OUT_OF_STOCK");
+
+    await verifyMatrix(t, ids, "16. aggregate oversell", before, {
+      operation: "two new teeL lines ×6 each — 12 > the 10 on the shelf",
+      saleId: sale.sale._id,
+      stock: { teeL: 10 }, // nothing moved
+      ledger: { teeL: "purchase +10" },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed"],
+      version: 0,
+    });
+  });
+
+  test("17. a fully paid delivered order becomes partially unpaid after adding items", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    await t.mutation(api.payments.receive, {
+      saleId: sale.sale._id,
+      amount: 2000,
+      method: "cash",
+    });
+
+    const after = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
+    });
+
+    expect(after.total).toBe(3000);
+    expect(after.paid).toBe(2000);
+    expect(after.remaining).toBe(1000); // the extra shirt is still owed
+  });
+
+  test("18. a double-click retry creates no duplicate line, row or event", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+
+    const payload = {
+      saleId: sale.sale._id,
+      expectedVersion: 0,
+      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" as const }],
+    };
+    await t.mutation(api.sales.saveEdit, payload);
+    // The page's saving guard stops a second click; if it still fires, the
+    // stale guard (version now 1) refuses the retry — nothing duplicates.
+    const code = await errorCodeOf(t.mutation(api.sales.saveEdit, payload));
+    expect(code).toBe("STALE_EDIT");
+
+    await verifyMatrix(t, ids, "18. double-click retry", before, {
+      operation: "the same delivered-edit payload sent twice",
+      saleId: sale.sale._id,
+      stock: { teeL: 9 },
+      ledger: { teeL: "purchase +10, sale -1" }, // exactly one deduction
+      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+      events: ["created", "status_changed", "item_added"],
+      snapshots: [400, 400],
+      version: 1,
+    });
+  });
+
+  test("19. a stale window's save writes nothing", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    const code = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        expectedVersion: 99, // another window saved since this page loaded
+        items: [
+          { saleItemId: line._id, qty: 1 },
+          { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+        ],
+        resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      })
+    );
+    expect(code).toBe("STALE_EDIT");
+
+    await verifyMatrix(t, ids, "19. stale edit writes nothing", before, {
+      operation: "a save from a window that loaded an old version — refused",
+      saleId: sale.sale._id,
+      stock: { teeM: 8, teeL: 10 }, // no return, no deduction
+      ledger: {
+        teeM: "purchase +10, sale -2",
+        teeL: "purchase +10",
+      },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed"],
+      version: 0,
+    });
+  });
+
+  test("20. a mid-save failure rolls the return and the new lines back", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    // The return resolution lands first (inside the transaction), then the
+    // new line oversells — the stock check fails and EVERYTHING rolls back:
+    // no return row, no qtyReturned patch, no new line, no version bump.
+    const code = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        items: [
+          { saleItemId: line._id, qty: 1 },
+          { variantId: ids.teeM, qty: 99, fulfillment: "handed_now" },
+        ],
+        resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      })
+    );
+    expect(code).toBe("OUT_OF_STOCK");
+
+    await verifyMatrix(t, ids, "20. mid-save rollback", before, {
+      operation: "valid return resolution + overselling new line — NOTHING lands",
+      saleId: sale.sale._id,
+      stock: { teeM: 8 },
+      ledger: { teeM: "purchase +10, sale -2" },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed"],
+      version: 0,
+    });
+  });
+
+  test("21. existing delivered lines cannot change silently", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const before = await opening(t, ids);
+    const line = sale.items[0].item;
+
+    // (a) lower the billed qty without a resolution → the held-floor check.
+    const below = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        items: [{ saleItemId: line._id, qty: 1 }],
+      })
+    );
+    expect(below).toBe("INVALID_QTY");
+    // (b) raise the billed qty → the delivered lock.
+    const raise = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        items: [{ saleItemId: line._id, qty: 3 }],
+      })
+    );
+    expect(raise).toBe("DELIVERED_LOCKED_LINES");
+    // (c) swap a line the customer still holds → the held guard refuses
+    //     before the swap can even be considered.
+    const swap = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        items: [{ saleItemId: line._id, variantId: ids.teeL, qty: 2 }],
+      })
+    );
+    expect(swap).toBe("INVALID_INPUT");
+    // (d) fulfillment is only for NEW lines on a DELIVERED order — a new
+    //     line with fulfillment on an undelivered order is refused.
+    const other = await checkout(t, ids, [{ variantId: ids.shirtBlack, qty: 1 }]);
+    const elsewhere = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: other.sale._id,
+        items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
+      })
+    );
+    expect(elsewhere).toBe("INVALID_INPUT");
+
+    await verifyMatrix(t, ids, "21. existing lines stay locked", before, {
+      operation: "lower / raise / swap / fulfillment-outside — all refused",
+      saleId: sale.sale._id,
+      stock: { teeM: 8, teeL: 10 },
+      ledger: {
+        teeM: "purchase +10, sale -2",
+        teeL: "purchase +10",
+      },
+      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+      events: ["created", "status_changed"],
+      version: 0,
+    });
+  });
+
+  test("21b. a returned-to-zero delivered line still cannot be swapped", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    const line = sale.items[0].item;
+
+    // First save: everything comes back, a replacement line goes out.
+    await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      items: [
+        { saleItemId: line._id, qty: 0 },
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
+      ],
+      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 2 }],
+    });
+
+    // Second save: the old (now empty) line has no held pieces, so it would
+    // pass the held guard — the DELIVERED lock itself must refuse it: no
+    // silent re-labeling of a delivered order's history.
+    const swap = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        saleId: sale.sale._id,
+        expectedVersion: 1,
+        items: [{ saleItemId: line._id, variantId: ids.shirtBlack, qty: 0 }],
+      })
+    );
+    expect(swap).toBe("DELIVERED_LOCKED_LINES");
+  });
+
+  test("22. no Exchange / Change Size / Add-on workflow exists on the edit page", async () => {
+    // The strict-UX contract: the delivered-order edit runs entirely through
+    // the ONE items table — return held pieces (the resolution dialog) and
+    // add with the Add-an-item search. No separate exchange UI may ever
+    // exist; this test fails the moment one is introduced.
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const componentsDir = path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      "../src/components/features/sales"
+    );
+    for (const file of [
+      "sale-edit-form.tsx",
+      "sale-edit-items-table.tsx",
+      "resolution-dialog.tsx",
+    ]) {
+      const source = fs.readFileSync(path.join(componentsDir, file), "utf8");
+      const found = /exchange|change size|add-on|add on/i.test(source);
+      expect(found, `${file} must not offer an Exchange / Change Size / Add-on workflow`).toBe(
+        false
+      );
+    }
   });
 });

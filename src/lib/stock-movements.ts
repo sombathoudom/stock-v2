@@ -181,16 +181,36 @@ export function visibleUnitCost(
   return ref?.unitCost;
 }
 
-/** Integrity: with no date filter, the newest loaded row's after-balance
- * must equal the current ledger-derived stock. A mismatch is REPORTED, never
- * silently corrected. */
+/** The newest row of a complete stream: the row the server walk ended at.
+ * Within a same-ts operation the true sequence is the balance chain (one
+ * row's before equals the next's after) — the (ts, _id) tiebreak is NOT the
+ * server's walk order and can land on a mid-chain row (e.g. a 4-piece
+ * return written as four +1 rows in one transaction shows 2→3→4→5→6, and
+ * the max-_id row is any of those, not the 6). The chain end carries the
+ * current stock by construction, so a mismatch against it is honest. */
+function newestRowOf(rows: MovementRow[]): MovementRow {
+  const maxTs = Math.max(...rows.map((r) => r.ts));
+  const chain = chainOrder(rows.filter((r) => r.ts === maxTs));
+  return chain[chain.length - 1];
+}
+
+/** Integrity: only meaningful when the sheet shows the COMPLETE unfiltered
+ * global stream. A date filter, a reason filter, or a paginated subset makes
+ * the newest loaded row's after-balance legitimately differ from the current
+ * ledger-derived stock (e.g. "Stock out" hides the returns that landed after
+ * the last sale), so the check is skipped there. A mismatch on the complete
+ * stream is REPORTED, never silently corrected. */
 export function integrityMismatch(
   rows: MovementRow[],
   currentStock: number,
-  hasDateFilter: boolean
+  hasDateFilter: boolean,
+  hasReasonFilter: boolean,
+  isComplete: boolean
 ): { expected: number; actual: number } | null {
-  if (hasDateFilter || rows.length === 0) return null;
-  const newest = newestFirst(rows)[0];
+  if (hasDateFilter || hasReasonFilter || !isComplete || rows.length === 0) {
+    return null;
+  }
+  const newest = newestRowOf(rows);
   if (newest.balance === currentStock) return null;
   return { expected: currentStock, actual: newest.balance };
 }

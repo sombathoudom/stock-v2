@@ -118,12 +118,12 @@ export function PosPaymentDialog({
 
   // Editable review fields — reset to defaults every time the popup opens.
   // The sale date is sent only when the cashier actually changes it (so a
-  // normal same-day sale keeps the exact `now` timestamp server-side).
+  // normal same-day sale keeps the exact `now` timestamp server-side). The
+  // payment date defaults to NOW too — money counts at the moment it's
+  // received; only an explicit earlier date backdates it.
   const [saleDate, setSaleDate] = useState<number>(() => localMidnight(Date.now()));
   const [saleDateDirty, setSaleDateDirty] = useState(false);
-  const [paymentDate, setPaymentDate] = useState<number>(() =>
-    localMidnight(Date.now())
-  );
+  const [paymentDate, setPaymentDate] = useState<number>(() => Date.now());
   const [paymentNote, setPaymentNote] = useState("");
   const [saleNote, setSaleNote] = useState("");
 
@@ -131,7 +131,7 @@ export function PosPaymentDialog({
     if (open) {
       setSaleDate(localMidnight(Date.now()));
       setSaleDateDirty(false);
-      setPaymentDate(localMidnight(Date.now()));
+      setPaymentDate(Date.now());
       setPaymentNote("");
       setSaleNote("");
     }

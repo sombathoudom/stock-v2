@@ -464,13 +464,25 @@ export const saleDetail = v.object({
  * so a dropped row can never silently cancel stock.
  *
  * An EXISTING line may also carry a different `variantId` to swap the line
- * to another item (only while nothing on that line was delivered yet). */
+ * to another item (only while nothing on that line was delivered yet).
+ *
+ * `fulfillment` exists ONLY for new lines on a DELIVERED order: how the
+ * customer gets these extra items. Handed now = fully delivered at this
+ * moment (the order stays Delivered); deliver later = a second trip, so the
+ * line starts delivered-0 and the order becomes Partially delivered. It is
+ * rejected anywhere else. */
+export const newItemFulfillment = v.union(
+  v.literal("handed_now"),
+  v.literal("deliver_later")
+);
+
 export const saleEditItemInput = v.object({
   saleItemId: v.optional(v.id("saleItems")),
   variantId: v.optional(v.id("productVariants")),
   qty: v.number(),
   discount: v.optional(v.union(v.number(), v.null())), // undefined = keep, null = clear
   price: v.optional(v.number()), // unit-price override; undefined = keep / re-derive
+  fulfillment: v.optional(newItemFulfillment), // new lines on delivered orders only
 });
 
 // --- Return / correction resolutions (Edit Sale + guided cancel, T12+) ---
@@ -513,6 +525,10 @@ export const saleEditLine = v.object({
   billedQty: v.number(),
   stock: v.number(),
   maxQty: v.number(),
+  // What happened to the pieces that came back — derived from the ledger,
+  // so the items table can say "Returned · Sellable" / "Returned · Damaged"
+  // instead of a generic "Removed". null = this line has no return history.
+  returnedOutcome: v.union(v.literal("sellable"), v.literal("damaged"), v.null()),
 });
 
 /** Everything the edit page loads in one read. `version` is the order's edit

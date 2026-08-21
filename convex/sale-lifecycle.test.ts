@@ -342,6 +342,9 @@ describe("sale lifecycle invariants", () => {
     await t.mutation(api.sales.setStatus, { saleId, status: "delivered" });
 
     // Invariant 4: a delivered sale may never gain a line with no outcome.
+    // New lines ARE allowed (returns + extra items on the Edit Sale page),
+    // but each one must carry its fulfillment choice — without it the save
+    // is refused before anything is written.
     const addCode = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
         saleId,
@@ -351,7 +354,7 @@ describe("sale lifecycle invariants", () => {
         ],
       })
     );
-    check("S3 add line on delivered rejected with DELIVERED_LOCKED_LINES", "DELIVERED_LOCKED_LINES", addCode);
+    check("S3 new line on delivered without outcome rejected with INVALID_INPUT", "INVALID_INPUT", addCode);
 
     const raiseCode = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {

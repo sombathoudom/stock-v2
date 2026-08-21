@@ -163,6 +163,31 @@ function StateChips({ group }: { group: SaleItemGroup }) {
   );
 }
 
+/** Right-aligned numeric cell class; a ZERO value is muted so the
+ * non-zero quantities and totals (and the row state badge) are what
+ * catch the eye. */
+function qtyClass(v: number): string {
+  return `text-right tabular-nums${v === 0 ? " text-muted-foreground" : ""}`;
+}
+
+/** One "Label: value" pair on the mobile line card — the value pops when it
+ * is NOT zero, so returned ($0) lines stay quiet and billed lines stand out. */
+function LineValue({
+  label,
+  value,
+  zero,
+}: {
+  label: string;
+  value: string | number;
+  zero: boolean;
+}) {
+  return (
+    <span>
+      {label}: <span className={zero ? "" : "text-foreground"}>{value}</span>
+    </span>
+  );
+}
+
 function PriceCell({ group, currency }: { group: SaleItemGroup; currency: string }) {
   if (group.multiplePrices) {
     return (
@@ -233,6 +258,7 @@ function LineRows({
           <Table>
             <TableHeader>
               <TableRow className="text-xs">
+                <TableHead>{labels.itemQtys.saleLineSku}</TableHead>
                 <TableHead>{labels.itemQtys.ordered}</TableHead>
                 <TableHead className="text-right">{labels.itemQtys.delivered}</TableHead>
                 <TableHead className="text-right">{labels.itemQtys.cancelled}</TableHead>
@@ -249,33 +275,45 @@ function LineRows({
                 const original = byId.get(line.line.saleItemId as Id<"saleItems">);
                 return (
                   <TableRow key={line.line.saleItemId} className="text-sm">
-                    <TableCell className="text-muted-foreground">
-                      {line.line.sku ?? line.line.variantLabel}
+                    <TableCell>
+                      <div className="flex flex-col items-start gap-1">
+                        <span className="text-muted-foreground">
+                          {line.line.sku ?? line.line.variantLabel}
+                        </span>
+                        {line.line.qtyReturned > 0 ? (
+                          <Badge
+                            variant="secondary"
+                            className="text-xs font-normal"
+                          >
+                            {labels.lineStateReturnedSellable}
+                          </Badge>
+                        ) : null}
+                      </div>
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.line.qtyOrdered)}>
                       {line.line.qtyOrdered}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.line.qtyDelivered)}>
                       {line.line.qtyDelivered}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.line.qtyCancelled)}>
                       {line.line.qtyCancelled}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.line.qtyReturned)}>
                       {line.line.qtyReturned}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.withCustomer)}>
                       {line.withCustomer}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.line.unitPrice)}>
                       {formatMoney(line.line.unitPrice, currency, getLang())}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className="text-right tabular-nums text-muted-foreground">
                       {(line.line.discount ?? 0) > 0
                         ? `−${formatMoney(line.line.discount!, currency, getLang())}`
                         : "—"}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className={qtyClass(line.subtotal)}>
                       {formatMoney(line.subtotal, currency, getLang())}
                     </TableCell>
                     <TableCell className="text-right">
@@ -450,33 +488,58 @@ function GroupCard({
                 className="flex flex-col gap-1 py-2 text-sm"
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">
-                    {line.line.sku ?? line.line.variantLabel}
-                  </span>
-                  <span className="font-medium tabular-nums">
+                  <div className="flex flex-col items-start gap-1">
+                    <span className="text-muted-foreground">
+                      {line.line.sku ?? line.line.variantLabel}
+                    </span>
+                    {line.line.qtyReturned > 0 ? (
+                      <Badge
+                        variant="secondary"
+                        className="text-xs font-normal"
+                      >
+                        {labels.lineStateReturnedSellable}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <span
+                    className={`font-medium tabular-nums${
+                      line.subtotal === 0 ? " text-muted-foreground" : ""
+                    }`}
+                  >
                     {formatMoney(line.subtotal, currency, getLang())}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                  <span>
-                    {labels.itemQtys.ordered}: {line.line.qtyOrdered}
-                  </span>
-                  <span>
-                    {labels.itemQtys.delivered}: {line.line.qtyDelivered}
-                  </span>
-                  <span>
-                    {labels.itemQtys.cancelled}: {line.line.qtyCancelled}
-                  </span>
-                  <span>
-                    {labels.itemQtys.returned}: {line.line.qtyReturned}
-                  </span>
-                  <span>
-                    {labels.itemQtys.withCustomer}: {line.withCustomer}
-                  </span>
-                  <span>
-                    {labels.price}:{" "}
-                    {formatMoney(line.line.unitPrice, currency, getLang())}
-                  </span>
+                  <LineValue
+                    label={labels.itemQtys.ordered}
+                    value={line.line.qtyOrdered}
+                    zero={line.line.qtyOrdered === 0}
+                  />
+                  <LineValue
+                    label={labels.itemQtys.delivered}
+                    value={line.line.qtyDelivered}
+                    zero={line.line.qtyDelivered === 0}
+                  />
+                  <LineValue
+                    label={labels.itemQtys.cancelled}
+                    value={line.line.qtyCancelled}
+                    zero={line.line.qtyCancelled === 0}
+                  />
+                  <LineValue
+                    label={labels.itemQtys.returned}
+                    value={line.line.qtyReturned}
+                    zero={line.line.qtyReturned === 0}
+                  />
+                  <LineValue
+                    label={labels.itemQtys.withCustomer}
+                    value={line.withCustomer}
+                    zero={line.withCustomer === 0}
+                  />
+                  <LineValue
+                    label={labels.price}
+                    value={formatMoney(line.line.unitPrice, currency, getLang())}
+                    zero={line.line.unitPrice === 0}
+                  />
                   {(line.line.discount ?? 0) > 0 ? (
                     <span>
                       {labels.discount}: −

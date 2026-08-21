@@ -5,7 +5,7 @@ import { Cancel01Icon, Tick02Icon, Undo02Icon } from "@hugeicons/core-free-icons
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { FormProvider, useController, useForm, useFormContext } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -49,6 +49,14 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { useShop } from "@/hooks/use-shop";
 import {
@@ -68,6 +76,7 @@ import {
   linePrice,
   lineQty,
   lineSubtotal,
+  projectAvailability,
   type EditLine,
 } from "./sale-edit-items-table";
 import { ALL_STATUSES, CAN_CANCEL, NEXT_STEPS, type SaleStatus } from "./sale-status-flow";
@@ -179,9 +188,11 @@ function CustomerField({ seedLabel }: { seedLabel: string }) {
 }
 
 /** The order's lines as editable rows. `maxQty` comes from the server: the
- * pieces this line already bills plus what's left on the shelf. */
+ * pieces this line already bills plus what's left on the shelf — the stock
+ * column shows the real shelf. `inputMax` caps the quantity box alone. */
 function toEditLines(data: SaleEditData): EditLine[] {
-  return data.items.map(({ item, variant, product, billedQty, maxQty }) => ({
+  return data.items.map(
+    ({ item, variant, product, billedQty, maxQty, returnedOutcome, stock }) => ({
     key: item._id,
     saleItemId: item._id,
     variantId: variant._id,
@@ -197,10 +208,22 @@ function toEditLines(data: SaleEditData): EditLine[] {
     originalDiscount: item.discount ?? 0,
     qtyDelivered: item.qtyDelivered,
     qtyReturned: item.qtyReturned,
+    // On a DELIVERED order an existing line is final: it can only shrink
+    // through the resolution flow, never grow — extra pieces come in as NEW
+    // lines via the Add-an-item search. Capping the INPUT at billed stops
+    // the quantity box from even offering a raise (the server refuses it
+    // too); the Available stock column still shows the real shelf above.
     maxQty,
+    inputMax: data.sale.status === "delivered" ? billedQty : maxQty,
     // A line that already bills nothing was cancelled or returned long ago.
     // It opens in the removed state — it is history, not a row to fix.
     removed: billedQty === 0,
+    // What came back: the badge says "Returned · Sellable" (or Damaged)
+    // instead of the generic "Removed" when the ledger proves a return.
+    returnedOutcome,
+    // Current database stock of this variant — the base of the shared
+    // stock projection (same value on every line of the variant).
+    stock,
   }));
 }
 
@@ -242,6 +265,12 @@ export function SaleEditForm({
   const [refundNote, setRefundNote] = useState("");
   const [resolveLine, setResolveLine] = useState<EditLine | null>(null);
   const [cancelReviewOpen, setCancelReviewOpen] = useState(false);
+  // Extra items on a DELIVERED order: one choice for how the customer gets
+  // them, and it decides the order's status (handed now → stays Delivered;
+  // deliver later → Partially delivered). The server enforces the same rule.
+  const [newFulfillment, setNewFulfillment] = useState<"handed_now" | "deliver_later">(
+    "handed_now"
+  );
 
   // Pieces per line already covered by pending resolutions (returnable
   // outcomes only — still_with_customer doesn't shrink the edit floor).
@@ -250,6 +279,66 @@ export function SaleEditForm({
     for (const r of pendingResolutions) {
       if (r.outcome === "still_with_customer") continue;
       map[r.saleItemId] = (map[r.saleItemId] ?? 0) + r.qty;
+    }
+    return map;
+  }, [pendingResolutions]);
+
+  // Pieces per line that flow back onto the shelf when this save runs:
+  // sellable returns and wrong-delivery corrections. Persisted returns are
+  // ALREADY in the database stock (the ledger row was written on their
+  // save) — they never appear here again.
+  const returnInByLine = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const r of pendingResolutions) {
+      if (
+        r.outcome === "returned_sellable" ||
+        r.outcome === "delivery_incorrect"
+      ) {
+        map.set(r.saleItemId, (map.get(r.saleItemId) ?? 0) + r.qty);
+      }
+    }
+    return map;
+  }, [pendingResolutions]);
+
+  // Pieces per line that drop off the bill in this save (every return
+  // outcome — damaged pieces leave the bill without adding stock).
+  const billCutByLine = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const r of pendingResolutions) {
+      if (
+        r.outcome === "returned_sellable" ||
+        r.outcome === "returned_damaged" ||
+        r.outcome === "delivery_incorrect"
+      ) {
+        map.set(r.saleItemId, (map.get(r.saleItemId) ?? 0) + r.qty);
+      }
+    }
+    return map;
+  }, [pendingResolutions]);
+
+  // The shared shelf projection — ONE source feeding both the Available
+  // stock column and the quantity validation, so the two can never show
+  // contradictory numbers (the bug this projection replaces).
+  const availabilityByVariant = useMemo(
+    () => projectAvailability(lines, returnInByLine, billCutByLine),
+    [lines, returnInByLine, billCutByLine]
+  );
+
+  // The latest pending return outcome per line — the table names a pending
+  // return ("Pending return · Sellable") and shows its stock effect.
+  const pendingOutcomeByLine = useMemo(() => {
+    const map: Record<
+      string,
+      { outcome: "sellable" | "damaged" | "incorrect"; qty: number }
+    > = {};
+    for (const r of pendingResolutions) {
+      if (r.outcome === "returned_sellable") {
+        map[r.saleItemId] = { outcome: "sellable", qty: r.qty };
+      } else if (r.outcome === "returned_damaged") {
+        map[r.saleItemId] = { outcome: "damaged", qty: r.qty };
+      } else if (r.outcome === "delivery_incorrect") {
+        map[r.saleItemId] = { outcome: "incorrect", qty: r.qty };
+      }
     }
     return map;
   }, [pendingResolutions]);
@@ -332,7 +421,74 @@ export function SaleEditForm({
   const total = Math.max(0, itemsSubtotal - orderDiscount + shippingFee);
   const remaining = total - data.paid;
 
-  const rowErrors = lines.some((l) => lineError(l, resolvedQtyByLine[l.key] ?? 0) != null);
+  // New lines (the Add-an-item search) — on a delivered order these carry
+  // the fulfillment choice that drives the order's status.
+  const newLines = lines.filter((l) => l.saleItemId === undefined);
+  const fulfillmentActive = sale.status === "delivered" && newLines.length > 0;
+  const derivedStatus: SaleStatus | null = fulfillmentActive
+    ? newFulfillment === "deliver_later"
+      ? "partially_delivered"
+      : "delivered"
+    : null;
+
+  /** "Basic Tee — M · Black" for a pending resolution row (saleItemId is the
+   * line key for saved lines). */
+  const lineLabelOf = useCallback((saleItemId: string): string => {
+    const line = lines.find((l) => l.key === saleItemId);
+    return line ? `${line.productName} — ${line.variantLabel}` : saleItemId;
+  }, [lines]);
+
+  // What this save moves on the shelf, per line: pending returns and
+  // wrong-delivery corrections flow back in; undelivered quantity cuts
+  // return the difference; new/increased lines go out. Damaged returns
+  // net to zero (the damage adjustment cancels the return row). This is
+  // the SAME math the server's saveEdit writes — mirroring it here means
+  // the summary always agrees with the ledger rows the save produces.
+  const netStockRows = useMemo(() => {
+    // Keyed by VARIANT, not by line: two lines of the same variant are
+    // one shelf movement (and the server checks stock per variant). That
+    // also keeps the rendered row keys unique — product names aren't.
+    const byVariant = new Map<string, { key: string; label: string; net: number }>();
+    const bump = (variantId: string, label: string, delta: number) => {
+      const cur = byVariant.get(variantId);
+      byVariant.set(variantId, {
+        key: variantId,
+        label,
+        net: (cur?.net ?? 0) + delta,
+      });
+    };
+    for (const line of lines) {
+      const returnIn = returnInByLine.get(line.key) ?? 0;
+      const billCut = billCutByLine.get(line.key) ?? 0;
+      const billedAfter = Math.max(0, line.originalQty - billCut);
+      const activeQty = line.removed ? 0 : (lineQty(line) ?? 0);
+      const net = returnIn + billedAfter - activeQty;
+      if (net !== 0) bump(line.variantId, lineLabelOf(line.key), net);
+    }
+    return [...byVariant.values()];
+  }, [lines, returnInByLine, billCutByLine, lineLabelOf]);
+
+  // Money in the change summary: what the order ends up at vs where it
+  // started, and whether the shipping fee moved.
+  const prevTotal = data.total;
+  const totalDelta = total - prevTotal;
+  const refundDue = total < data.paid ? data.paid - total : 0;
+  const shippingChanged = shippingFee !== sale.deliveryFee;
+
+  // While new lines decide the status, the dropdown mirrors the derived one
+  // (it is disabled below) — the save can never send a conflicting status.
+  // When the last new line is removed, the order's real status comes back.
+  useEffect(() => {
+    if (fulfillmentActive) {
+      form.setValue("status", derivedStatus ?? sale.status);
+    } else if (form.getValues("status") !== sale.status) {
+      form.setValue("status", sale.status);
+    }
+  }, [fulfillmentActive, newFulfillment, form, derivedStatus, sale.status]);
+
+  const rowErrors = lines.some(
+    (l) => lineError(l, resolvedQtyByLine[l.key] ?? 0, availabilityByVariant) != null
+  );
   const liveLines = lines.filter((l) => !l.removed).length;
   const dirty =
     form.formState.isDirty ||
@@ -352,13 +508,6 @@ export function SaleEditForm({
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty, saving]);
-
-  /** "Basic Tee — M · Black" for a pending resolution row (saleItemId is the
-   * line key for saved lines). */
-  function lineLabelOf(saleItemId: string): string {
-    const line = lines.find((l) => l.key === saleItemId);
-    return line ? `${line.productName} — ${line.variantLabel}` : saleItemId;
-  }
 
   /** The resolution dialog confirmed what happened to held pieces: record it
    * and follow the new floor on the line (all resolved → removed). */
@@ -404,6 +553,19 @@ export function SaleEditForm({
     );
   }
 
+  /** Undo from the ITEMS TABLE: pops the line's most recent pending
+   * resolution (the one whose badge the button sits under). Only pending
+   * client-side resolutions are undoable — a persisted return has no Undo. */
+  function handleUndoResolution(line: EditLine) {
+    for (let i = pendingResolutions.length - 1; i >= 0; i--) {
+      const r = pendingResolutions[i];
+      if (r.saleItemId === line.key) {
+        undoResolution(r);
+        return;
+      }
+    }
+  }
+
   async function save(values: FormValues) {
     // Guard against a double click before the disabled state re-renders —
     // the second save would land on a bumped version and look like a conflict.
@@ -434,6 +596,9 @@ export function SaleEditForm({
           qty,
           ...(discount != null && discount > 0 ? { discount } : {}),
           ...(price !== undefined ? { price } : {}),
+          // Delivered orders: how the customer gets this extra item — the
+          // server derives the order's status from it (and re-validates it).
+          ...(fulfillmentActive ? { fulfillment: newFulfillment } : {}),
         };
       });
 
@@ -532,7 +697,12 @@ export function SaleEditForm({
                 name="status"
                 label={t().sales.status}
                 options={statusOptions}
-                hint={t().sales.statusPickHint}
+                hint={
+                  fulfillmentActive
+                    ? labels.statusFollowsFulfillment
+                    : t().sales.statusPickHint
+                }
+                disabled={fulfillmentActive}
                 required
               />
               {deliveryEditable ? (
@@ -565,6 +735,10 @@ export function SaleEditForm({
               disabled={saving}
               resolvedQtyByLine={resolvedQtyByLine}
               onResolveLine={setResolveLine}
+              delivered={data.sale.status === "delivered"}
+              availabilityByVariant={availabilityByVariant}
+              pendingOutcomeByLine={pendingOutcomeByLine}
+              onUndoResolution={handleUndoResolution}
             />
           </CardContent>
         </Card>
@@ -577,10 +751,49 @@ export function SaleEditForm({
             <CardTitle>{labels.changeSummaryTitle}</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3 text-sm">
-            {pendingResolutions.length === 0 && refundCents === 0 ? (
+            {pendingResolutions.length === 0 &&
+            refundCents === 0 &&
+            newLines.length === 0 &&
+            netStockRows.length === 0 ? (
               <p className="text-muted-foreground">{labels.changeSummaryEmpty}</p>
             ) : (
               <>
+                {fulfillmentActive && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-sm font-medium">
+                      {labels.fulfillmentAsk}
+                    </Label>
+                    <Select
+                      value={newFulfillment}
+                      // Base UI shows the RAW value in the trigger without
+                      // this map.
+                      items={{
+                        handed_now: labels.fulfillmentHandedNow,
+                        deliver_later: labels.fulfillmentDeliverLater,
+                      }}
+                      onValueChange={(value) =>
+                        setNewFulfillment(value as "handed_now" | "deliver_later")
+                      }
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="handed_now">
+                          {labels.fulfillmentHandedNow}
+                        </SelectItem>
+                        <SelectItem value="deliver_later">
+                          {labels.fulfillmentDeliverLater}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {newFulfillment === "handed_now"
+                        ? labels.fulfillmentHandedNowHint
+                        : labels.fulfillmentDeliverLaterHint}
+                    </p>
+                  </div>
+                )}
                 {(
                   [
                     ["returned_sellable", labels.changeSummarySellable, ""],
@@ -629,6 +842,105 @@ export function SaleEditForm({
                     </div>
                   );
                 })}
+                {newLines.length > 0 && (
+                  <div className="grid gap-1 border-t pt-2">
+                    <p className="font-medium">{labels.changeSummaryNewItems}</p>
+                    {newLines.map((l) => (
+                      <div
+                        key={l.key}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <span className="text-muted-foreground">
+                          • {l.productName} — {l.variantLabel} ×{lineQty(l) ?? 0}
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setLines((prev) => prev.filter((x) => x.key !== l.key))
+                          }
+                          disabled={saving}
+                          aria-label={labels.changeSummaryUndo}
+                        >
+                          <HugeiconsIcon
+                            icon={Undo02Icon}
+                            strokeWidth={2}
+                            className="size-4"
+                          />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {netStockRows.length > 0 && (
+                  <div className="grid gap-1 border-t pt-2">
+                    <p className="font-medium">{labels.changeSummaryNetStock}</p>
+                    {netStockRows.map((row) => (
+                      <div
+                        key={row.key}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <span className="text-muted-foreground">• {row.label}</span>
+                        <span className="tabular-nums">
+                          {row.net > 0 ? `+${row.net}` : row.net}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(totalDelta !== 0 || shippingChanged) && (
+                  <div className="grid gap-1 border-t pt-2">
+                    <p className="font-medium">{labels.changeSummaryMoney}</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">
+                        {labels.changeSummaryPrevTotal}
+                      </span>
+                      <span className="tabular-nums">
+                        {formatMoney(prevTotal, currency)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">
+                        {labels.changeSummaryNewTotal}
+                      </span>
+                      <span className="tabular-nums">
+                        {formatMoney(total, currency)}
+                      </span>
+                    </div>
+                    {totalDelta !== 0 && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">
+                          {totalDelta > 0
+                            ? labels.changeSummaryAdditional
+                            : refundDue > 0
+                              ? labels.changeSummaryRefundDue
+                              : labels.changeSummaryLessOwed}
+                        </span>
+                        <span className="tabular-nums">
+                          {totalDelta > 0
+                            ? `+${formatMoney(totalDelta, currency)}`
+                            : refundDue > 0
+                              ? formatMoney(refundDue, currency)
+                              : `−${formatMoney(-totalDelta, currency)}`}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">
+                        {labels.changeSummaryShippingChange}
+                      </span>
+                      <span className="tabular-nums">
+                        {shippingChanged
+                          ? `${shippingFee > sale.deliveryFee ? "+" : "−"}${formatMoney(
+                              Math.abs(shippingFee - sale.deliveryFee),
+                              currency
+                            )}`
+                          : labels.changeSummaryShippingUnchanged}
+                      </span>
+                    </div>
+                  </div>
+                )}
                 {refundCents > 0 ? (
                   <div className="flex items-center justify-between gap-2 border-t pt-2">
                     <span>

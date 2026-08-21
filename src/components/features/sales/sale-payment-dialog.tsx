@@ -51,12 +51,6 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 
-/** Local midnight for `now` (browser-local calendar day). */
-function localMidnight(now: number): number {
-  const d = new Date(now);
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-}
-
 function SummaryRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-2 text-sm">
@@ -83,10 +77,11 @@ export function SalePaymentDialog({
 }) {
   const receive = useMutation(api.payments.receive);
 
-  // Captured once on mount — the payment date defaults to today (local
-  // midnight) and is capped at today (backdating allowed, future not).
+  // Captured once on mount — the payment date defaults to NOW (the actual
+  // receipt moment) and is capped at today (backdating allowed, future
+  // not). Only an explicit earlier date changes the recorded day.
   const [maxDate] = useState(() => Date.now());
-  const [initialReceivedAt] = useState(() => localMidnight(Date.now()));
+  const [initialReceivedAt] = useState(() => Date.now());
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),

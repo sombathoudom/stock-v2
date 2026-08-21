@@ -857,6 +857,7 @@ export const labels = {
       stateWithCustomer: "{qty} with customer",
       stateCancelled: "{qty} cancelled",
       stateReturned: "{qty} returned",
+      lineStateReturnedSellable: "Returned · Sellable",
       markPending: "Mark pending",
       markPacked: "Mark packed",
       markDelivering: "Mark delivering",
@@ -912,8 +913,9 @@ export const labels = {
         delivered: "Delivered",
         cancelled: "Cancelled",
         returned: "Returned",
-        withCustomer: "With customer",
+        withCustomer: "Customer has",
         notDeliveredYet: "Awaiting delivery",
+        saleLineSku: "Sale line / SKU",
       },
       emptyHistory: "Nothing here yet.",
       // The full-page order editor. Nothing here touches stock until Save —
@@ -951,12 +953,44 @@ export const labels = {
         removeBody:
           "Its pieces go back to stock when you save. The line stays in the order history.",
         removed: "Removed",
+        // A line that bills nothing because its pieces came back. The ledger
+        // tells which: sellable returns are a lone return row, damaged ones
+        // are netted by an adjustment.
+        returnedSellable: "Returned · Sellable",
+        returnedDamaged: "Returned · Damaged",
+        // A return the staff decided in this window but did NOT save yet —
+        // only this state is undoable (a saved return is history).
+        pendingReturnSellable: "Pending return · Sellable",
+        pendingReturnDamaged: "Pending return · Damaged",
+        // A saved return is immutable history — the badge says why there is
+        // no Undo beside it.
+        historicalReturn: "Historical return · Already saved",
+        // What a pending sellable return does to the shelf when saved.
+        pendingReturnStockIn: "Stock +{qty} when saved",
         undo: "Undo",
         heldLocked: "{qty} with customer",
         newLine: "New",
+        // Extra items added to a DELIVERED order: how the customer gets them,
+        // and what that does to the order status.
+        fulfillmentAsk: "How will the customer receive the new items?",
+        fulfillmentHandedNow: "Handed to customer now",
+        fulfillmentDeliverLater: "Deliver later",
+        fulfillmentHandedNowHint: "The order stays Delivered.",
+        fulfillmentDeliverLaterHint: "The order becomes Partially delivered.",
+        statusFollowsFulfillment: "Status follows how the new items are received.",
         // Pending return/correction resolutions shown before Save — the
         // change summary mirrors exactly what the server will apply.
         changeSummaryTitle: "Changes in this save",
+        changeSummaryNewItems: "Leaving stock",
+        changeSummaryNetStock: "Net stock",
+        changeSummaryMoney: "Money",
+        changeSummaryPrevTotal: "Previous total",
+        changeSummaryNewTotal: "New total",
+        changeSummaryAdditional: "Additional owed",
+        changeSummaryRefundDue: "Refund due",
+        changeSummaryLessOwed: "Less owed",
+        changeSummaryShippingChange: "Shipping fee change",
+        changeSummaryShippingUnchanged: "Shipping fee unchanged",
         changeSummaryEmpty: "No returns or corrections yet.",
         changeSummarySellable: "Returning to sellable stock",
         changeSummaryDamaged: "Returned damaged",
@@ -1864,6 +1898,7 @@ export const labels = {
       stateWithCustomer: "នៅជាមួយអតិថិជន {qty}",
       stateCancelled: "បានលុប {qty}",
       stateReturned: "បានបង្វិល {qty}",
+      lineStateReturnedSellable: "បានបង្វិល · អាចលក់វិញ",
       markPending: "សម្គាល់ថាកំពុងរង់ចាំ",
       markPacked: "សម្គាល់ថាខ្ចប់រួច",
       markDelivering: "សម្គាល់ថាកំពុងដឹក",
@@ -1922,8 +1957,9 @@ export const labels = {
         delivered: "បានដឹកជូន",
         cancelled: "បានបោះបង់",
         returned: "បានបង្វិល",
-        withCustomer: "នៅជាមួយអតិថិជន",
+        withCustomer: "អតិថិជនមាន",
         notDeliveredYet: "រង់ចាំការដឹកជូន",
+        saleLineSku: "ទំនិញ / SKU",
       },
       emptyHistory: "មិនទាន់មានអ្វីនៅឡើយ។",
       // ទំព័រកែសម្រួលការបញ្ជាទិញ — ស្តុកមិនផ្លាស់ប្តូរទេ រហូតដល់ចុចរក្សាទុក។
@@ -1958,11 +1994,34 @@ export const labels = {
         removeBody:
           "ទំនិញនឹងត្រឡប់ចូលស្តុកវិញពេលអ្នករក្សាទុក។ ជួរនេះនៅតែមាននៅក្នុងប្រវត្តិ។",
         removed: "បានដកចេញ",
+        returnedSellable: "ប្រគល់មកវិញ · អាចលក់",
+        returnedDamaged: "ប្រគល់មកវិញ · ខូច",
+        pendingReturnSellable: "កំពុងប្រគល់មកវិញ · អាចលក់",
+        pendingReturnDamaged: "កំពុងប្រគល់មកវិញ · ខូច",
+        historicalReturn: "ប្រវត្តិប្រគល់មកវិញ · បានរក្សាទុកហើយ",
+        pendingReturnStockIn: "ស្តុក +{qty} ពេលរក្សាទុក",
         undo: "ត្រឡប់វិញ",
         heldLocked: "នៅជាមួយអតិថិជន {qty}",
         newLine: "ថ្មី",
+        // ទំនិញថ្មីដែលបន្ថែមលើការបញ្ជាទិញដែលបានបញ្ជូនរួច៖ របៀបដែលអតិថិជនទទួល។
+        fulfillmentAsk: "តើអតិថិជនទទួលទំនិញថ្មីដោយរបៀបណា?",
+        fulfillmentHandedNow: "ប្រគល់ឱ្យអតិថិជនឥឡូវនេះ",
+        fulfillmentDeliverLater: "បញ្ជូននៅពេលក្រោយ",
+        fulfillmentHandedNowHint: "ការបញ្ជាទិញនៅតែស្ថានភាព បានបញ្ជូនរួច។",
+        fulfillmentDeliverLaterHint: "ការបញ្ជាទិញក្លាយជា បានបញ្ជូនមួយផ្នែក។",
+        statusFollowsFulfillment: "ស្ថានភាពតាមរបៀបដែលអតិថិជនទទួលទំនិញថ្មី។",
         // សេចក្តីសង្ខេបនៃការបង្វិល/កែតម្រូវដែលកំពុងរង់ចាំ មុនពេលរក្សាទុក។
         changeSummaryTitle: "ការផ្លាស់ប្តូរនៅក្នុងការរក្សាទុកនេះ",
+        changeSummaryNewItems: "ទំនិញចេញពីស្តុក",
+        changeSummaryNetStock: "ស្តុកសុទ្ធ",
+        changeSummaryMoney: "ប្រាក់",
+        changeSummaryPrevTotal: "សរុបពីមុន",
+        changeSummaryNewTotal: "សរុបថ្មី",
+        changeSummaryAdditional: "ត្រូវបង់បន្ថែម",
+        changeSummaryRefundDue: "ត្រូវបង្វិលប្រាក់",
+        changeSummaryLessOwed: "ជំពាក់តិចជាងមុន",
+        changeSummaryShippingChange: "ការផ្លាស់ប្តូរថ្លៃដឹកជញ្ជូន",
+        changeSummaryShippingUnchanged: "ថ្លៃដឹកជញ្ជូនមិនផ្លាស់ប្តូរ",
         changeSummaryEmpty: "មិនទាន់មានការបង្វិល ឬកែតម្រូវទេ។",
         changeSummarySellable: "បង្វិលទៅស្តុកលក់វិញ",
         changeSummaryDamaged: "បានត្រឡប់ដោយខូចខាត",

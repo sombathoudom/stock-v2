@@ -185,8 +185,67 @@ describe("grouping and summaries", () => {
       row({ delta: -2, balance: 8, ts: 200, reason: "sale" }),
     ];
     expect(newestFirst(rows)[0].balance).toBe(8); // current stock
-    expect(integrityMismatch(rows, 8, false)).toBeNull();
-    expect(integrityMismatch(rows, 7, false)).toEqual({ expected: 7, actual: 8 });
+    expect(integrityMismatch(rows, 8, false, false, true)).toBeNull();
+    expect(integrityMismatch(rows, 7, false, false, true)).toEqual({
+      expected: 7,
+      actual: 8,
+    });
+  });
+
+  test("11b. a reason filter never fires the integrity warning", () => {
+    // The reported false alarm: with "Stock out" selected, the sheet passes
+    // only sale rows while the header still shows the FULL total — the
+    // returns that landed after the last sale legitimately lift the ledger
+    // above the newest sale's after-balance.
+    const rows = [
+      row({ delta: 10, balance: 10, ts: 100 }),
+      row({ delta: -4, balance: 6, ts: 200, reason: "sale" }),
+      row({ delta: 2, balance: 8, ts: 300, reason: "return" }),
+    ];
+    const saleRows = rows.filter((r) => r.reason === "sale");
+    expect(integrityMismatch(saleRows, 8, false, true, true)).toBeNull();
+  });
+
+  test("11c. a paginated subset never fires the integrity warning", () => {
+    // Page 2+ sees older rows whose after-balance predates later movements;
+    // the check only speaks on the complete loaded stream.
+    const page2 = [row({ delta: -1, balance: 5, ts: 300, reason: "sale" })];
+    expect(integrityMismatch(page2, 8, false, false, false)).toBeNull();
+    // the same rows as a complete stream still check:
+    expect(integrityMismatch(page2, 8, false, false, true)).toEqual({
+      expected: 8,
+      actual: 5,
+    });
+  });
+
+  test("11d. a same-ts multi-row operation: the newest row is the chain end, not the max id", () => {
+    // The live false alarm: a 4-piece return written as four +1 rows in ONE
+    // transaction (same ts). The sheet displays the chain 2→3→4→5→6, but
+    // the (ts, _id) tiebreak picks the max-_id row — a mid-chain row
+    // (balance 4) — and compared it against the ledger total 6, rendering
+    // "the ledger shows 6, this view shows 4" on a healthy ledger.
+    const rows = [
+      row({ delta: 1, balance: 3, ts: 900, _id: "a", reason: "return" }),
+      row({ delta: 1, balance: 4, ts: 900, _id: "z", reason: "return" }),
+      row({ delta: 1, balance: 5, ts: 900, _id: "j", reason: "return" }),
+      row({ delta: 1, balance: 6, ts: 900, _id: "m", reason: "return" }),
+    ];
+    expect(newestFirst(rows)[0].balance).toBe(4); // the pre-fix pick (mid-chain)
+    expect(integrityMismatch(rows, 6, false, false, true)).toBeNull();
+  });
+
+  test("11e. a real drift still reports, with the chain-end balance as actual", () => {
+    // A movement landed after the list read: the sheet's stock header (8) is
+    // stale; the newest chain ends at 9. The banner must name 9 — the true
+    // newest row — never a mid-chain row.
+    const rows = [
+      row({ delta: 1, balance: 8, ts: 900, _id: "a", reason: "return" }),
+      row({ delta: 1, balance: 9, ts: 900, _id: "z", reason: "return" }),
+    ];
+    expect(integrityMismatch(rows, 8, false, false, true)).toEqual({
+      expected: 8,
+      actual: 9,
+    });
   });
 
   test("12. pagination does not reset the running balance", () => {
@@ -483,8 +542,8 @@ describe("atomic operation grouping (spec fix)", () => {
     ];
     const sum = rows.reduce((s2, r) => s2 + r.delta, 0);
     expect(sum).toBe(8); // the ledger sum
-    expect(integrityMismatch(rows, sum, false)).toBeNull(); // newest == current
-    expect(integrityMismatch(rows, 7, false)).toEqual({ expected: 7, actual: 8 });
+    expect(integrityMismatch(rows, sum, false, false, true)).toBeNull(); // newest == current
+    expect(integrityMismatch(rows, 7, false, false, true)).toEqual({ expected: 7, actual: 8 });
   });
 });
 

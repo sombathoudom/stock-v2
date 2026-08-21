@@ -730,3 +730,266 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     expect(detailA!.remaining).toBe(detailB!.remaining);
   });
 });
+
+describe("persisted returns on the Edit Sale page (regression: undo reactivation + stock projection)", () => {
+  /** Everything the edit page sees for the order's lines. */
+  async function editDataOf(t: ReturnType<typeof convexTest>, saleId: Id<"sales">) {
+    const data = await t.query(api.sales.getEditData, { saleId });
+    expect(data).not.toBeNull();
+    return data!;
+  }
+
+  test("16. a saved return reloads as immutable history (sellable)", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+
+    // The line opens as history: bills nothing, the ledger says it came back,
+    // and the shelf projection starts from the CURRENT stock (10) — the
+    // returned piece is already in it and is NEVER added a second time.
+    const data = await editDataOf(t, sale.sale._id);
+    expect(data.items[0].billedQty).toBe(0);
+    expect(data.items[0].returnedOutcome).toBe("sellable");
+    expect(data.items[0].stock).toBe(10);
+    expect(data.items[0].maxQty).toBe(10);
+    expect(data.items[0].item.qtyReturned).toBe(1);
+    expect(data.items[0].item.qtyDelivered).toBe(1); // historical, preserved
+  });
+
+  test("17. resaving the page as-is is a clean no-op — no ledger rows, no events", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+    const version = await versionOf(t, sale.sale._id);
+    const eventsBefore = await eventTypes(t, sale.sale._id);
+
+    const result = await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { expectedVersion: version }
+    );
+
+    // Nothing moved: same ledger rows, same stock, same events, same line.
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await stockOf(t, ids.teeM)).toBe(10);
+    expect(await eventTypes(t, sale.sale._id)).toEqual(eventsBefore);
+    expect(result!.items[0].item.qtyReturned).toBe(1);
+    expect(result!.items[0].item.qtyDelivered).toBe(1);
+  });
+
+  test("18. a persisted return cannot be reactivated on a delivered order", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+
+    // A stale/tampered client re-sends the returned line as an active line.
+    const code = await errorCodeOf(
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }])
+    );
+    expect(code).toBe("DELIVERED_LOCKED_LINES");
+    // The refusal wrote nothing.
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await stockOf(t, ids.teeM)).toBe(10);
+  });
+
+  test("19. a persisted return cannot be reactivated after the delivered mark is corrected", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+    // The only way a delivered order re-opens: the mark was a mistake.
+    await t.mutation(api.sales.setStatus, { saleId: sale.sale._id, status: "partially_delivered" });
+
+    // On the now-unlocked order the returned line must still refuse to come
+    // back — the guard lives on the RETURNED state, not the delivered lock.
+    const code = await errorCodeOf(
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }])
+    );
+    expect(code).toBe("INVALID_QTY");
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await stockOf(t, ids.teeM)).toBe(10);
+  });
+
+  test("20. a partially-returned line cannot be raised above its post-return billed qty", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 2 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 1 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+    expect(await stockOf(t, ids.teeM)).toBe(9); // 10 − 2 + 1
+    await t.mutation(api.sales.setStatus, { saleId: sale.sale._id, status: "partially_delivered" });
+
+    // One piece returned → billedOld is 1 → raising back to 2 is a second
+    // billing of the returned piece (the ledger return row is immutable).
+    const code = await errorCodeOf(
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 2 }])
+    );
+    expect(code).toBe("INVALID_QTY");
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -2, return +1");
+    expect(await stockOf(t, ids.teeM)).toBe(9);
+  });
+
+  test("21. the customer gets the returned item again as a NEW line — one deduction, history intact", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+    const version = await versionOf(t, sale.sale._id);
+
+    const result = await t.mutation(api.sales.saveEdit, {
+      saleId: sale.sale._id,
+      expectedVersion: version,
+      items: [
+        { saleItemId: sale.items[0].item._id, qty: 0 },
+        { variantId: ids.teeM, qty: 1, fulfillment: "handed_now" },
+      ],
+    });
+
+    // The new line deducts current stock EXACTLY once (the returned piece is
+    // already back on the shelf, so stock goes 10 → 9 — never 8).
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1, sale -1");
+    expect(await stockOf(t, ids.teeM)).toBe(9);
+    // A NEW saleItem identity — never a merge with the historical line.
+    expect(result!.items).toHaveLength(2);
+    const original = result!.items.find((i) => i.item._id === sale.items[0].item._id)!;
+    const added = result!.items.find((i) => i.item._id !== sale.items[0].item._id)!;
+    expect(original.item.qtyReturned).toBe(1); // history preserved, untouched
+    expect(original.item.qtyDelivered).toBe(1);
+    expect(original.item.qtyOrdered).toBe(1);
+    expect(added.item.qtyOrdered).toBe(1);
+    expect(added.item.variantId).toBe(ids.teeM);
+    expect(added.item.unitCostSnapshot).toBe(400); // current weighted average
+    // Event SET (not order): saleEvents sharing one millisecond tie-break by
+    // random _id, so cross-mutation order within a ms is nondeterministic —
+    // this test pins what matters: every event exists exactly once, including
+    // the historical items_returned (nothing was rewritten) and item_added.
+    expect((await eventTypes(t, sale.sale._id)).sort()).toEqual(
+      ["created", "lines_adjusted", "status_changed", "items_returned", "item_added"].sort()
+    );
+  });
+
+  test("22. a stale edit-window save is refused and duplicates nothing", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    const version = await versionOf(t, sale.sale._id);
+
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      {
+        expectedVersion: version,
+        resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }],
+      }
+    );
+
+    // The same save retried with the OLD version — the order moved on.
+    const code = await errorCodeOf(
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 0 }], {
+        expectedVersion: version,
+        resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }],
+      })
+    );
+    expect(code).toBe("STALE_EDIT");
+    // The retry wrote nothing: still exactly one return row, one item_returned.
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect((await eventTypes(t, sale.sale._id)).filter((e) => e === "items_returned")).toEqual([
+      "items_returned",
+    ]);
+    expect(await stockOf(t, ids.teeM)).toBe(10);
+  });
+
+  test("23. edit data projects the shelf for a partially-returned line", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 3 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 3 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 2 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+    );
+
+    const data = await editDataOf(t, sale.sale._id);
+    // 2 still billed, 1 returned: stock 8 already holds the returned piece.
+    expect(data.items[0].billedQty).toBe(2);
+    expect(data.items[0].stock).toBe(8);
+    expect(data.items[0].maxQty).toBe(10);
+    expect(data.items[0].returnedOutcome).toBe("sellable");
+  });
+
+  test("24. a damaged persisted return reads as Damaged and nets stock to zero", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_damaged", qty: 1 }] }
+    );
+
+    const data = await editDataOf(t, sale.sale._id);
+    expect(data.items[0].billedQty).toBe(0);
+    expect(data.items[0].returnedOutcome).toBe("damaged"); // damaged wins
+    expect(data.items[0].stock).toBe(9); // 10 − 1 + 1 − 1 — the shelf got nothing
+  });
+
+  test("25. raising an undelivered line beyond the shelf is refused by the aggregate check", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 8 }]);
+
+    // 2 on the shelf (10 − 8); asking for 5 more must fail — even though no
+    // single line's input cap catches it, the variant-level check does.
+    const code = await errorCodeOf(
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 13 }])
+    );
+    expect(code).toBe("OUT_OF_STOCK");
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -8");
+    expect(await stockOf(t, ids.teeM)).toBe(2);
+  });
+});

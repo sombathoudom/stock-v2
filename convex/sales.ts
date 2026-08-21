@@ -616,9 +616,34 @@ export const getEditData = query({
     const productById = new Map(
       products.filter((product) => product !== null).map((product) => [product._id, product] as const)
     );
+    // One indexed ledger read per distinct variant — the same read the stock
+    // sum uses — also classifies this order's returned lines: a sellable
+    // return is a lone "return" row; a damaged one is paired with an
+    // "adjustment" row on the same line (the damage nets its return to
+    // zero). Manual adjustments and delivery corrections never carry a
+    // saleItemId, so only damaged returns can flag a line.
     const stockByVariant = new Map<string, number>();
+    const returnedOutcomeByLine = new Map<string, "sellable" | "damaged">();
     for (const variantId of variantIds) {
-      stockByVariant.set(variantId, await variantQty(ctx, variantId));
+      const rows = await ctx.db
+        .query("stockLedger")
+        .withIndex("by_variant_ts", (q) => q.eq("variantId", variantId))
+        .collect();
+      let stock = 0;
+      const damagedLines = new Set<string>();
+      for (const row of rows) {
+        stock += row.delta;
+        if (row.saleItemId === undefined) continue;
+        if (row.reason === "adjustment") damagedLines.add(row.saleItemId);
+        else if (row.reason === "return") {
+          returnedOutcomeByLine.set(row.saleItemId, "sellable");
+        }
+      }
+      // Damaged wins over sellable when a line saw both.
+      for (const saleItemId of damagedLines) {
+        returnedOutcomeByLine.set(saleItemId, "damaged");
+      }
+      stockByVariant.set(variantId, stock);
     }
 
     const items = [];
@@ -628,7 +653,15 @@ export const getEditData = query({
       if (!variant || !product) continue; // defensive — nothing is hard-deleted
       const billedQty = item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
       const stock = stockByVariant.get(item.variantId) ?? 0;
-      items.push({ item, variant, product, billedQty, stock, maxQty: billedQty + stock });
+      items.push({
+        item,
+        variant,
+        product,
+        billedQty,
+        stock,
+        maxQty: billedQty + stock,
+        returnedOutcome: returnedOutcomeByLine.get(item._id) ?? null,
+      });
     }
 
     const total = await computeTotal(ctx, sale);
@@ -1706,6 +1739,9 @@ export const saveEdit = mutation({
           qty: number;
           price: number;
           discount: number;
+          // How the customer gets these extra items — REQUIRED when the order
+          // is delivered (see the planning branch below), absent elsewhere.
+          fulfillment?: "handed_now" | "deliver_later";
         };
 
     const plans: LinePlan[] = [];
@@ -1717,6 +1753,14 @@ export const saveEdit = mutation({
         if (!item || item.saleId !== sale._id) throw lineNotInSale();
         if (seenLines.has(item._id)) throw duplicateLine();
         seenLines.add(item._id);
+        // Fulfillment is a NEW-line concept only — how extra items reach the
+        // customer after delivery. Existing lines already have their history.
+        if (entry.fulfillment !== undefined) {
+          throw new ConvexError({
+            code: "INVALID_INPUT",
+            message: "Fulfillment only applies to new items.",
+          });
+        }
         const fromVariant = await ctx.db.get(item.variantId);
         const fromProduct = fromVariant
           ? await ctx.db.get(fromVariant.productId)
@@ -1756,6 +1800,25 @@ export const saveEdit = mutation({
             code: "INVALID_QTY",
             message:
               "Can't go below the quantity the customer has — return those pieces instead.",
+          });
+        }
+        // A line with RETURNED pieces can never be raised back above its
+        // post-return billed quantity (billedOld already excludes them).
+        // Those pieces flowed back into stock when the return was saved —
+        // the ledger rows are immutable, so re-billing them here would
+        // charge the customer twice for the same goods without ever moving
+        // stock. The customer who wants the item again gets it as a NEW
+        // line, which deducts current stock exactly once and keeps this
+        // line's delivered/returned history intact. This also rejects the
+        // stale/tampered client that re-sends a saved return as an active
+        // ordinary line. On a DELIVERED order this never fires — the
+        // DELIVERED_LOCKED_LINES check below is the contract there (its
+        // message already points the user at the add-item search).
+        if (sale.status !== "delivered" && item.qtyReturned > 0 && qty > billedOld) {
+          throw new ConvexError({
+            code: "INVALID_QTY",
+            message:
+              "Returned pieces can't go back on this line — add the item as a new line instead.",
           });
         }
         const price =
@@ -1817,26 +1880,76 @@ export const saveEdit = mutation({
                 "Item discount is out of range."
               );
         if (discount > price * qty) throw itemDiscountOutOfRange();
-        plans.push({ kind: "new", variant, product, qty, price, discount });
+        // How the customer gets these extra items — REQUIRED on a delivered
+        // order (they were added after the first delivery). Handed now: the
+        // pieces go over on the spot and the order stays Delivered. Deliver
+        // later: they wait for a second trip, so the order becomes Partially
+        // delivered. On any other order a new line starts delivered-0 the
+        // usual way and fulfillment must be absent.
+        let fulfillment: "handed_now" | "deliver_later" | undefined;
+        if (sale.status === "delivered") {
+          if (entry.fulfillment === undefined) {
+            throw new ConvexError({
+              code: "INVALID_INPUT",
+              message:
+                "How will the customer receive the new items? Choose handed now or deliver later.",
+            });
+          }
+          fulfillment = entry.fulfillment;
+        } else if (entry.fulfillment !== undefined) {
+          throw new ConvexError({
+            code: "INVALID_INPUT",
+            message: "Fulfillment only applies to new items on a delivered order.",
+          });
+        }
+        plans.push({ kind: "new", variant, product, qty, price, discount, fulfillment });
       }
     }
 
-    // Invariant 4: a DELIVERED order is finished — every line has its final
-    // outcome, so the line set is locked. Adding a line, changing a billed
-    // quantity or swapping an item would leave lines with no outcome on a
-    // "delivered" order. Returns, exchanges and door adjustments have their
-    // own flows (returnItems / setLineDelivered); order-level field edits
-    // (fees, customer, channel, prices, discounts) stay allowed here.
+    // Invariant 4: on a DELIVERED order the EXISTING lines are final — their
+    // billed quantities and items can't silently change (held pieces move via
+    // the resolutions applied above; swaps belong to the return flow). But
+    // NEW lines are allowed: the customer came back after delivery, returned
+    // pieces and bought more. Each new line must carry its fulfillment
+    // outcome (handed now / deliver later), applied in Phase 2, and the
+    // order's status follows from it. Order-level field edits (fees,
+    // customer, channel, prices, discounts) stay allowed here as before.
     if (sale.status === "delivered") {
       const structural = plans.some(
-        (p) => p.kind === "new" || p.swapped || p.deltaBilled !== 0
+        (p) => p.kind === "existing" && (p.swapped || p.deltaBilled !== 0)
       );
       if (structural) {
         throw new ConvexError({
           code: "DELIVERED_LOCKED_LINES",
           message:
-            "This order is delivered — item changes go through the return and exchange flows.",
+            "This order is delivered — existing lines can't change. Return held pieces from the table, and add new items with the Add an item search.",
         });
+      }
+    }
+
+    // Fulfillment drives the order's status when a delivered order gains new
+    // lines: every item handed over → it stays Delivered (all quantities are
+    // final); any item going out later → Partially delivered (a second trip
+    // is coming). The server decides and the client must agree — a client
+    // status can never overrule the physical outcome.
+    let derivedStatus: Doc<"sales">["status"] | null = null;
+    if (sale.status === "delivered") {
+      const newPlans = plans.filter(
+        (p): p is Extract<LinePlan, { kind: "new" }> => p.kind === "new"
+      );
+      if (newPlans.length > 0) {
+        derivedStatus = newPlans.some((p) => p.fulfillment === "deliver_later")
+          ? "partially_delivered"
+          : "delivered";
+        if (args.status !== undefined && args.status !== derivedStatus) {
+          throw new ConvexError({
+            code: "INVALID_INPUT",
+            message:
+              derivedStatus === "delivered"
+                ? "The new items are all handed over — this order stays Delivered."
+                : "Some new items go out later — this order becomes Partially delivered.",
+          });
+        }
       }
     }
 
@@ -1920,7 +2033,11 @@ export const saveEdit = mutation({
           unitPrice: plan.price,
           unitCostSnapshot,
           qtyOrdered: plan.qty,
-          qtyDelivered: 0,
+          // Handed now = the pieces went over with the return visit, so the
+          // line is delivered on the spot. Deliver later = they wait for the
+          // second trip (delivered-0), exactly like a new line on any other
+          // order — either way stock left the shelf exactly once, above.
+          qtyDelivered: plan.fulfillment === "handed_now" ? plan.qty : 0,
           qtyCancelled: 0,
           qtyReturned: 0,
           ...(plan.discount > 0 ? { discount: plan.discount } : {}),
@@ -1938,7 +2055,15 @@ export const saveEdit = mutation({
           saleId: sale._id,
           type: "item_added",
           summary: `Added ${label} ×${plan.qty}.`,
-          payload: { item: label, qty: String(plan.qty) },
+          payload: {
+            item: label,
+            qty: String(plan.qty),
+            // Marked on the audit trail so "delivered-0" reads as a waiting
+            // second trip, not a plain unshipped line.
+            ...(plan.fulfillment === "deliver_later"
+              ? { fulfillment: "deliver_later" }
+              : {}),
+          },
           userId: staff._id,
           ts: now,
         });
@@ -2092,6 +2217,10 @@ export const saveEdit = mutation({
       if (Object.keys(itemPatch).length > 0) await ctx.db.patch(item._id, itemPatch);
     }
 
+    // The order-field events sort after the line events in the events index —
+    // same-ts ties would order arbitrarily (the resolution/refund phases above
+    // follow the same convention).
+    now += 1;
     // Every save bumps the order's edit counter (the stale-edit guard reads
     // it) — even a no-op save, so a later save from a stale window is told
     // to reload instead of overwriting anything.
@@ -2105,12 +2234,18 @@ export const saveEdit = mutation({
     // outstanding, and "delivered" has to fill the quantities they ended at.
     // `sale` is deliberately the pre-patch doc — the transition only reads
     // status / code / deliveredAt, none of which a field edit touches.
-    if (args.status !== undefined && args.status !== sale.status) {
+    // The status event sorts last: it's the consequence of everything above.
+    now += 1;
+    // `derivedStatus` (set above) is the physical truth on a delivered order
+    // with new lines and wins over the client's argument; a client status
+    // only moves the order when nothing was derived.
+    const targetStatus = derivedStatus ?? args.status;
+    if (targetStatus !== undefined && targetStatus !== sale.status) {
       await transitionSaleStatus(
         ctx,
         sale,
         staff,
-        args.status,
+        targetStatus,
         { deliveryFee, chargeDeliveryFee: args.chargeDeliveryFee },
         now
       );

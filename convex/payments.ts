@@ -99,7 +99,10 @@ export const receive = mutation({
         ...(note ? { note } : {}),
       },
       userId: staff._id,
-      ts: now,
+      // The event rides on the RECEIPT moment, not the click moment — so
+      // payment-history's client join (event.ts === receivedAt) attributes
+      // "By <staff>" for explicit dates too (backdated or dialog-captured).
+      ts: receivedAt,
     });
     return (await ctx.db.get(paymentId))!;
   },
