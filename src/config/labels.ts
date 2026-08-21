@@ -943,6 +943,14 @@ export const labels = {
         colAction: "Action",
         emptyItems: "No items on this order yet — search above to add one.",
         notEnoughStock: "Only {qty} available.",
+        // A raise is measured as a DELTA against the line's billed quantity:
+        // the shelf funds extra pieces, and the message says exactly how many
+        // and the ceiling it may reach — never a raw stock comparison.
+        raiseLimit: "Only {qty} more available — maximum total quantity is {max}.",
+        // A raise's extra pieces are a new purchase at today's price — shown
+        // whenever that differs from the line's own price (the subtotal
+        // already prices them that way).
+        deltaPriceHint: "Extra pieces are priced at today's price.",
         invalidQty: "Enter a whole number, 1 or more.",
         // The edit floor is what the customer HOLDS (invariant 6), not the
         // historical delivered count — returned pieces can drop off the bill.
@@ -1986,6 +1994,13 @@ export const labels = {
         colAction: "សកម្មភាព",
         emptyItems: "មិនទាន់មានទំនិញទេ — ស្វែងរកខាងលើដើម្បីបន្ថែម។",
         notEnoughStock: "មានតែ {qty} ប៉ុណ្ណោះ។",
+        // ការបន្ថែមបរិមាណវាស់ជា DELTA ធៀបនឹងបរិមាណដែលគិតលុយបច្ចុប្បន្ន៖ ស្តុកគាំទ្រ
+        // ចំនួនបន្ថែម ហើយសារបង្ហាញចំនួនដែលអាចបន្ថែមបាន និងដែនកំណត់អតិបរមា។
+        raiseLimit:
+          "អាចបន្ថែមបានតែ {qty} ទៀតប៉ុណ្ណោះ — ចំនួនសរុបអតិបរមាគឺ {max}។",
+        // ទំនិញបន្ថែមគឺជាការទិញថ្មីក្នុងតម្លៃបច្ចុប្បន្ន — បង្ហាញពេលវាខុសពី
+        // តម្លៃរបស់ជួរនេះ (ចំនួនសរុបគិតតាមរបៀបនេះរួចហើយ)។
+        deltaPriceHint: "ទំនិញបន្ថែមគិតតម្លៃតាមតម្លៃបច្ចុប្បន្ន។",
         invalidQty: "សូមបញ្ចូលចំនួនគត់ ចាប់ពី ១ ឡើងទៅ។",
         belowHeld: "អតិថិជនកំពុងកាន់ {qty} — សូមប្រើការបង្វិលទំនិញវិញ។",
         discountTooBig: "លើសពីតម្លៃទំនិញនេះ។",

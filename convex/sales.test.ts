@@ -230,7 +230,11 @@ describe("sales.saveEdit", () => {
 
     expect(await stockOf(t, ids.variantM)).toBe(5); // 10 − 5, not 10 − 2 − 5
     expect(await movementCount(t, ids.variantM)).toBe(before + 1); // one movement row
-    expect(billed(after.items[0].item)).toBe(5);
+    // The raise is an ADD-ON: the original line keeps billing 2, and the
+    // extra 3 live in their own internal split line (never a rewrite).
+    expect(billed(after.items[0].item)).toBe(2);
+    expect(billed(after.items[1].item)).toBe(3);
+    expect(after.items[1].item.splitFromItemId).toBe(after.items[0].item._id);
     expect(after.total).toBe(5000);
   });
 

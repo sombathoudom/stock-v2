@@ -78,11 +78,15 @@ export type EditLine = {
   /** Highest this line can be raised to: its own billed pieces + shelf stock.
    * Drives the "Available stock" column — the real shelf the staff can see. */
   maxQty: number;
-  /** Hard cap for the quantity box. Same as maxQty, except on a delivered
-   * order a held line is final: it can only shrink through the resolution
-   * flow, never grow — extra pieces come in as NEW lines. The column above
-   * still shows the real shelf; only the input is capped. */
+  /** Hard cap for the quantity box — same as maxQty on every line: a raise
+   * is measured as a DELTA against the line's billed quantity, so the only
+   * real ceiling is the line's own pieces plus the shared shelf projection
+   * (availableForLine), never a delivered-orders-only cap. */
   inputMax: number;
+  /** What a RAISE's extra pieces are priced at: the variant's CURRENT sell
+   * price (server-derived, same derivation saveEdit uses for the split
+   * line) — the extra pieces are a new purchase at today's price. */
+  currentPrice: number;
   /** Marked for removal — applied (and returned to stock) on save. */
   removed: boolean;
   /** What happened to the pieces that came back (from the ledger): a line
@@ -133,13 +137,30 @@ export function lineDiscount(line: EditLine): number | null {
   return inputToCents(line.discount);
 }
 
-export function lineSubtotal(line: EditLine): number {
+/** What the line keeps billing after the pending resolutions that drop
+ * pieces off the bill — the same "current billed quantity" the server
+ * measures deltas against. */
+export function lineBilledAfter(line: EditLine, billCut = 0): number {
+  return Math.max(0, line.originalQty - billCut);
+}
+
+/** The line's subtotal, priced exactly as saveEdit bills it: the billed
+ * pieces keep the line's own price and discount, but a RAISE's extra pieces
+ * are a new purchase at the variant's CURRENT price — so the number shown
+ * and the number enforced on save can never disagree. */
+export function lineSubtotal(line: EditLine, billCut = 0): number {
   if (line.removed) return 0;
   const qty = lineQty(line);
   const price = linePrice(line);
   const discount = lineDiscount(line);
   if (qty == null || price == null || discount == null) return 0;
-  return Math.max(0, qty * price - discount);
+  const billed = lineBilledAfter(line, billCut);
+  const billedPieces = Math.min(qty, billed);
+  const raisedPieces = Math.max(0, qty - billed);
+  return Math.max(
+    0,
+    billedPieces * price - discount + raisedPieces * line.currentPrice
+  );
 }
 
 /**
@@ -153,14 +174,19 @@ export function lineSubtotal(line: EditLine): number {
  *
  * `availability` is the shared variant-level projection (projectAvailability)
  * — the SAME numbers the Available stock column renders, so the validation
- * error and the displayed stock can never disagree. The one extra bound is
- * `inputMax` on a delivered order: existing lines are final there and can
- * never be raised (the server refuses it too).
+ * error and the displayed stock can never disagree.
+ *
+ * `billCut` is the line's pending resolutions dropping off the bill — the
+ * current billed baseline shrinks by it, and the raise limit is measured
+ * against THAT baseline: the line may grow by whatever the shared shelf
+ * projection still has, up to `max = billedAfter + shelf` — never by
+ * comparing the typed quantity directly against stock.
  */
 export function lineError(
   line: EditLine,
   resolvedQty = 0,
-  availability?: ReadonlyMap<string, VariantAvailability>
+  availability?: ReadonlyMap<string, VariantAvailability>,
+  billCut = 0
 ): string | null {
   if (line.removed) return null;
   const labels = t().sales.edit;
@@ -174,15 +200,19 @@ export function lineError(
     return labels.belowHeld.replace("{qty}", String(held));
   }
   // Aggregate stock check, per variant: every line of the variant shares one
-  // projection, so duplicate lines can't each draw the full shelf.
+  // projection, so duplicate lines can't each draw the full shelf. The
+  // ceiling is the line's own billed pieces PLUS what the shelf can still
+  // fund — a raise only needs the DELTA, so a line at 1 with 9 on the shelf
+  // may go to 10, not to 9.
   if (availability !== undefined) {
     const available = availableForLine(line, availability);
     if (qty > available) {
-      return labels.notEnoughStock.replace("{qty}", String(available));
+      const billedAfter = lineBilledAfter(line, billCut);
+      const more = Math.max(0, available - billedAfter);
+      return labels.raiseLimit
+        .replace("{qty}", String(more))
+        .replace("{max}", String(available));
     }
-  }
-  if (qty > line.inputMax) {
-    return labels.notEnoughStock.replace("{qty}", String(line.inputMax));
   }
   const price = linePrice(line);
   if (price == null) return labels.priceRequired;
@@ -297,17 +327,14 @@ export function availableForLine(
 export type RemovedLineState =
   | "readonly" // persisted return: history, no Undo, no delete
   | "undo-resolution" // pending return: Undo pops the pending resolution
-  | "undo" // pending removal / cancelled history: plain Undo
-  | "none"; // cancelled history on a delivered order (server refuses it)
+  | "undo"; // pending removal / cancelled history: plain Undo
 
 export function removedLineState(
   line: EditLine,
-  delivered: boolean,
   pendingOutcome?: "sellable" | "damaged" | "incorrect"
 ): RemovedLineState {
   if (line.returnedOutcome != null) return "readonly";
   if (pendingOutcome != null) return "undo-resolution";
-  if (delivered) return "none";
   return "undo";
 }
 
@@ -318,7 +345,7 @@ export function SaleEditItemsTable({
   disabled,
   resolvedQtyByLine,
   onResolveLine,
-  delivered,
+  billCutByLine,
   availabilityByVariant,
   pendingOutcomeByLine,
   onUndoResolution,
@@ -327,17 +354,16 @@ export function SaleEditItemsTable({
   onChange: (next: EditLine[]) => void;
   currency: string;
   disabled: boolean;
-  /** True when the order is delivered: existing lines are final — the
-   * server refuses any billed-qty change (DELIVERED_LOCKED_LINES), so a
-   * cancelled-history line is not offered an Undo here (restoring one would
-   * be a guaranteed refusal). New items come in through the add-item search. */
-  delivered: boolean;
   /** Pending-resolution pieces per line key (returnable outcomes only —
    * still_with_customer doesn't shrink the floor). */
   resolvedQtyByLine: Record<string, number>;
   /** A line whose pieces are held by the customer was asked to drop below
    * the floor — the page opens the physical-outcome dialog for it. */
   onResolveLine: (line: EditLine) => void;
+  /** Every pending resolution's pieces per line key (all outcomes — what
+   * drops off the bill, feeding the billed baseline and the line subtotal
+   * exactly as the server measures them). */
+  billCutByLine: Record<string, number>;
   /** The shared per-variant stock projection — the one source for the
    * Available stock column and the quantity validation (lineError). */
   availabilityByVariant: ReadonlyMap<string, VariantAvailability>;
@@ -414,6 +440,7 @@ export function SaleEditItemsTable({
         stock: found.stock,
         maxQty: found.stock,
         inputMax: found.stock,
+        currentPrice: found.price,
         removed: false,
         returnedOutcome: null,
       },
@@ -455,13 +482,17 @@ export function SaleEditItemsTable({
     });
   }
 
-  const itemsSubtotal = lines.reduce((sum, l) => sum + lineSubtotal(l), 0);
+  const itemsSubtotal = lines.reduce(
+    (sum, l) => sum + lineSubtotal(l, billCutByLine[l.key] ?? 0),
+    0
+  );
 
   /** Everything one row needs to render — shared by the desktop table and
    * the phone cards so the two can never drift. */
   function rowView(line: EditLine) {
     const resolved = resolvedQtyByLine[line.key] ?? 0;
-    const error = lineError(line, resolved, availabilityByVariant);
+    const billCut = billCutByLine[line.key] ?? 0;
+    const error = lineError(line, resolved, availabilityByVariant, billCut);
     const qty = lineQty(line) ?? 0;
     const held = line.qtyDelivered - line.qtyReturned - resolved;
     const variant = availabilityByVariant.get(line.variantId);
@@ -471,9 +502,14 @@ export function SaleEditItemsTable({
     const after = variant?.after ?? line.stock;
     const pending = pendingOutcomeByLine[line.key];
     const removedAction = line.removed
-      ? removedLineState(line, delivered, pending?.outcome)
+      ? removedLineState(line, pending?.outcome)
       : null;
-    return { error, qty, held, shelf, after, pending, removedAction };
+    // Pieces this line adds BEYOND its billed baseline — they bill at the
+    // variant's CURRENT price, so when that differs from the line's own
+    // price the row says so (the displayed subtotal already prices them).
+    const raised = Math.max(0, qty - lineBilledAfter(line, billCut));
+    const pricedAtToday = raised > 0 && line.currentPrice !== linePrice(line);
+    return { error, qty, held, shelf, after, pending, removedAction, pricedAtToday };
   }
 
   return (
@@ -558,8 +594,16 @@ export function SaleEditItemsTable({
               </TableRow>
             ) : (
               lines.map((line) => {
-                const { error, qty, held, shelf, after, pending, removedAction } =
-                  rowView(line);
+                const {
+                  error,
+                  qty,
+                  held,
+                  shelf,
+                  after,
+                  pending,
+                  removedAction,
+                  pricedAtToday,
+                } = rowView(line);
                 return (
                   <TableRow
                     key={line.key}
@@ -640,6 +684,10 @@ export function SaleEditItemsTable({
                               )}
                             </span>
                           ) : null
+                        ) : pricedAtToday ? (
+                          <span className="text-xs text-muted-foreground">
+                            {labels.deltaPriceHint}
+                          </span>
                         ) : null}
                       </div>
                     </TableCell>
@@ -691,7 +739,10 @@ export function SaleEditItemsTable({
                       />
                     </TableCell>
                     <TableCell className="text-right font-medium tabular-nums">
-                      {formatMoney(lineSubtotal(line), currency)}
+                      {formatMoney(
+                        lineSubtotal(line, billCutByLine[line.key] ?? 0),
+                        currency
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       {line.removed ? (
@@ -761,8 +812,16 @@ export function SaleEditItemsTable({
           </p>
         ) : (
           lines.map((line) => {
-            const { error, qty, held, shelf, after, pending, removedAction } =
-              rowView(line);
+            const {
+              error,
+              qty,
+              held,
+              shelf,
+              after,
+              pending,
+              removedAction,
+              pricedAtToday,
+            } = rowView(line);
             return (
               <div
                 key={line.key}
@@ -925,7 +984,10 @@ export function SaleEditItemsTable({
                     {labels.colSubtotal}
                   </span>
                   <span className="font-medium tabular-nums">
-                    {formatMoney(lineSubtotal(line), currency)}
+                    {formatMoney(
+                      lineSubtotal(line, billCutByLine[line.key] ?? 0),
+                      currency
+                    )}
                   </span>
                 </div>
                 {error ? (
@@ -961,6 +1023,10 @@ export function SaleEditItemsTable({
                       )}
                     </p>
                   ) : null
+                ) : pricedAtToday ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {labels.deltaPriceHint}
+                  </p>
                 ) : null}
               </div>
             );

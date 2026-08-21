@@ -262,6 +262,12 @@ export default defineSchema({
     qtyCancelled: v.number(),
     qtyReturned: v.number(),
     discount: v.optional(v.number()), // per-item discount, integer cents
+    // A RAISE (saveEdit) never rewrites the original line: the extra pieces
+    // become their OWN internal row pointing back at it. The edit page shows
+    // them folded into the parent (getEditData merges), and saveEdit measures
+    // quantities against the parent's EFFECTIVE billed total (this row +
+    // every split row), so re-saving the same displayed quantity is a no-op.
+    splitFromItemId: v.optional(v.id("saleItems")),
   })
     .index("by_sale", ["saleId"])
     .index("by_variant", ["variantId"]),

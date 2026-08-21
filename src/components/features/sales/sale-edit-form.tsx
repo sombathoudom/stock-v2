@@ -189,10 +189,21 @@ function CustomerField({ seedLabel }: { seedLabel: string }) {
 
 /** The order's lines as editable rows. `maxQty` comes from the server: the
  * pieces this line already bills plus what's left on the shelf — the stock
- * column shows the real shelf. `inputMax` caps the quantity box alone. */
+ * column shows the real shelf. `inputMax` is the same ceiling on every line
+ * (a delivered order is no exception — a raise there splits into its own
+ * internal line, so the quantity box may grow exactly like anywhere else). */
 function toEditLines(data: SaleEditData): EditLine[] {
   return data.items.map(
-    ({ item, variant, product, billedQty, maxQty, returnedOutcome, stock }) => ({
+    ({
+      item,
+      variant,
+      product,
+      billedQty,
+      maxQty,
+      currentPrice,
+      returnedOutcome,
+      stock,
+    }) => ({
     key: item._id,
     saleItemId: item._id,
     variantId: variant._id,
@@ -208,13 +219,11 @@ function toEditLines(data: SaleEditData): EditLine[] {
     originalDiscount: item.discount ?? 0,
     qtyDelivered: item.qtyDelivered,
     qtyReturned: item.qtyReturned,
-    // On a DELIVERED order an existing line is final: it can only shrink
-    // through the resolution flow, never grow — extra pieces come in as NEW
-    // lines via the Add-an-item search. Capping the INPUT at billed stops
-    // the quantity box from even offering a raise (the server refuses it
-    // too); the Available stock column still shows the real shelf above.
     maxQty,
-    inputMax: data.sale.status === "delivered" ? billedQty : maxQty,
+    inputMax: maxQty,
+    // What a raise's extra pieces are priced at — the variant's CURRENT
+    // sell price (server-derived, matches saveEdit's split-line pricing).
+    currentPrice,
     // A line that already bills nothing was cancelled or returned long ago.
     // It opens in the removed state — it is history, not a row to fix.
     removed: billedQty === 0,
@@ -413,7 +422,10 @@ export function SaleEditForm({
 
   // --- Live totals. Display only: the server recomputes every one of these
   // from its own rows on save and is the one that decides. ---
-  const itemsSubtotal = lines.reduce((sum, l) => sum + lineSubtotal(l), 0);
+  const itemsSubtotal = lines.reduce(
+    (sum, l) => sum + lineSubtotal(l, billCutByLine.get(l.key) ?? 0),
+    0
+  );
   const orderDiscount = inputToCents(form.watch("discount")) ?? 0;
   const shippingFee = deliveryEditable
     ? (inputToCents(form.watch("deliveryFee")) ?? 0)
@@ -487,7 +499,13 @@ export function SaleEditForm({
   }, [fulfillmentActive, newFulfillment, form, derivedStatus, sale.status]);
 
   const rowErrors = lines.some(
-    (l) => lineError(l, resolvedQtyByLine[l.key] ?? 0, availabilityByVariant) != null
+    (l) =>
+      lineError(
+        l,
+        resolvedQtyByLine[l.key] ?? 0,
+        availabilityByVariant,
+        billCutByLine.get(l.key) ?? 0
+      ) != null
   );
   const liveLines = lines.filter((l) => !l.removed).length;
   const dirty =
@@ -735,8 +753,8 @@ export function SaleEditForm({
               disabled={saving}
               resolvedQtyByLine={resolvedQtyByLine}
               onResolveLine={setResolveLine}
-              delivered={data.sale.status === "delivered"}
               availabilityByVariant={availabilityByVariant}
+              billCutByLine={Object.fromEntries(billCutByLine)}
               pendingOutcomeByLine={pendingOutcomeByLine}
               onUndoResolution={handleUndoResolution}
             />

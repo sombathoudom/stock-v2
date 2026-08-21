@@ -646,21 +646,55 @@ export const getEditData = query({
       stockByVariant.set(variantId, stock);
     }
 
+    // RAISES split in saveEdit: the extra pieces live in their OWN saleItems
+    // row (splitFromItemId → the original line), each delta priced and costed
+    // at the moment of the raise. Those rows are INTERNAL — the edit page
+    // shows one line per original row, at the quantity the user last saved.
+    // Merging here folds each split's quantities back into its parent, so the
+    // displayed billed / held / returned numbers are the EFFECTIVE ones the
+    // order actually owes and the customer actually holds.
+    const splitsByParent = new Map<string, Doc<"saleItems">[]>();
+    for (const row of itemDocs) {
+      if (row.splitFromItemId === undefined) continue;
+      const list = splitsByParent.get(row.splitFromItemId) ?? [];
+      list.push(row);
+      splitsByParent.set(row.splitFromItemId, list);
+    }
     const items = [];
     for (const item of itemDocs) {
+      if (item.splitFromItemId !== undefined) continue; // folded into its parent
       const variant = variantById.get(item.variantId);
       const product = variant ? productById.get(variant.productId) : undefined;
       if (!variant || !product) continue; // defensive — nothing is hard-deleted
-      const billedQty = item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
+      const splits = splitsByParent.get(item._id) ?? [];
+      const merged = {
+        qtyOrdered:
+          item.qtyOrdered + splits.reduce((s, x) => s + x.qtyOrdered, 0),
+        qtyDelivered:
+          item.qtyDelivered + splits.reduce((s, x) => s + x.qtyDelivered, 0),
+        qtyCancelled:
+          item.qtyCancelled + splits.reduce((s, x) => s + x.qtyCancelled, 0),
+        qtyReturned:
+          item.qtyReturned + splits.reduce((s, x) => s + x.qtyReturned, 0),
+      };
+      const billedQty = merged.qtyOrdered - merged.qtyCancelled - merged.qtyReturned;
       const stock = stockByVariant.get(item.variantId) ?? 0;
+      const splitOutcome =
+        splits.length > 0
+          ? (returnedOutcomeByLine.get(splits[0]._id) ?? null)
+          : null;
       items.push({
-        item,
+        item: { ...item, ...merged },
         variant,
         product,
         billedQty,
         stock,
         maxQty: billedQty + stock,
-        returnedOutcome: returnedOutcomeByLine.get(item._id) ?? null,
+        // What a RAISE's extra pieces are priced at: the variant's CURRENT
+        // sell price — the same derivation saveEdit uses for the split line,
+        // so the edit page's live totals agree with the save.
+        currentPrice: variant.price ?? product.defaultPrice,
+        returnedOutcome: returnedOutcomeByLine.get(item._id) ?? splitOutcome,
       });
     }
 
@@ -1747,6 +1781,24 @@ export const saveEdit = mutation({
     const plans: LinePlan[] = [];
     const seenLines = new Set<string>();
 
+    // RAISES split into internal rows (splitFromItemId → parent), so the
+    // client — which only ever sends the parent's id and its DISPLAYED
+    // quantity — is measured against the line's EFFECTIVE totals (parent
+    // plus all its split rows). That makes a re-sent save a no-op (the split
+    // rows already hold the delta) and keeps the floor / returned guards
+    // honest against what the customer really holds.
+    const allItems = await ctx.db
+      .query("saleItems")
+      .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
+      .collect();
+    const splitsByParent = new Map<string, Doc<"saleItems">[]>();
+    for (const row of allItems) {
+      if (row.splitFromItemId === undefined) continue;
+      const list = splitsByParent.get(row.splitFromItemId) ?? [];
+      list.push(row);
+      splitsByParent.set(row.splitFromItemId, list);
+    }
+
     for (const entry of args.items) {
       if (entry.saleItemId !== undefined) {
         const item = await ctx.db.get(entry.saleItemId);
@@ -1761,6 +1813,21 @@ export const saveEdit = mutation({
             message: "Fulfillment only applies to new items.",
           });
         }
+        // EFFECTIVE totals: this row plus its internal raise rows (newest
+        // first), so the floor / returned guards and the swap rule below see
+        // what the customer really holds across the whole displayed line.
+        const splits = (splitsByParent.get(item._id) ?? [])
+          .slice()
+          .sort(
+            (a, b) =>
+              a._creationTime - b._creationTime || a._id.localeCompare(b._id)
+          );
+        const delivered =
+          item.qtyDelivered -
+          item.qtyReturned +
+          splits.reduce((s, x) => s + x.qtyDelivered - x.qtyReturned, 0);
+        const returned =
+          item.qtyReturned + splits.reduce((s, x) => s + x.qtyReturned, 0);
         const fromVariant = await ctx.db.get(item.variantId);
         const fromProduct = fromVariant
           ? await ctx.db.get(fromVariant.productId)
@@ -1774,11 +1841,21 @@ export const saveEdit = mutation({
         let variant = fromVariant;
         let product = fromProduct;
         if (swapped) {
-          if (item.qtyDelivered - item.qtyReturned > 0) {
+          if (delivered > 0) {
             throw new ConvexError({
               code: "INVALID_INPUT",
               message:
                 "Pieces were already delivered — return them first, then add the right item.",
+            });
+          }
+          // A raised line's extras live in separate internal rows; swapping
+          // the parent would leave them billed against the old item with no
+          // stock move. The extras have to leave the line first.
+          if (splits.length > 0) {
+            throw new ConvexError({
+              code: "INVALID_INPUT",
+              message:
+                "This line has extra pieces from an earlier raise — remove them first, then swap the item.",
             });
           }
           variant = await ctx.db.get(entry.variantId!);
@@ -1787,7 +1864,14 @@ export const saveEdit = mutation({
             throw new ConvexError({ code: "NOT_FOUND", message: "Item not found." });
           }
         }
-        const billedOld = item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
+        const billedOld =
+          item.qtyOrdered -
+          item.qtyCancelled -
+          item.qtyReturned +
+          splits.reduce(
+            (s, x) => s + x.qtyOrdered - x.qtyCancelled - x.qtyReturned,
+            0
+          );
         const qty = assertQty(entry.qty, 0, "qty");
         // Pieces currently with the customer were charged AND already left
         // the shelf. Taking them off the bill belongs to the return flow,
@@ -1795,7 +1879,7 @@ export const saveEdit = mutation({
         // them here would drop the charge and leave the goods out there.
         // Returned pieces are not held, so a line may go below its historical
         // delivered count (down to delivered − returned).
-        if (qty < item.qtyDelivered - item.qtyReturned) {
+        if (qty < delivered) {
           throw new ConvexError({
             code: "INVALID_QTY",
             message:
@@ -1811,10 +1895,10 @@ export const saveEdit = mutation({
         // line, which deducts current stock exactly once and keeps this
         // line's delivered/returned history intact. This also rejects the
         // stale/tampered client that re-sends a saved return as an active
-        // ordinary line. On a DELIVERED order this never fires — the
-        // DELIVERED_LOCKED_LINES check below is the contract there (its
-        // message already points the user at the add-item search).
-        if (sale.status !== "delivered" && item.qtyReturned > 0 && qty > billedOld) {
+        // ordinary line. It holds on DELIVERED orders too: raises are now
+        // allowed there (they split into a new line), but a returned line
+        // stays read-only — its pieces are history.
+        if (returned > 0 && qty > billedOld) {
           throw new ConvexError({
             code: "INVALID_QTY",
             message:
@@ -1837,7 +1921,15 @@ export const saveEdit = mutation({
                   "item discount",
                   "Item discount is out of range."
                 );
-        if (discount > price * qty) throw itemDiscountOutOfRange();
+        // The discount must fit the line's subtotal AS BILLED — the billed
+        // pieces at the line price plus any raised delta at the CURRENT
+        // price (the same contribution Phase 1 feeds the order-level
+        // discount check).
+        const subtotalContribution =
+          Math.min(qty, billedOld) * price +
+          Math.max(0, qty - billedOld) *
+            (variant!.price ?? product!.defaultPrice);
+        if (discount > subtotalContribution) throw itemDiscountOutOfRange();
         plans.push({
           kind: "existing",
           item,
@@ -1906,23 +1998,25 @@ export const saveEdit = mutation({
       }
     }
 
-    // Invariant 4: on a DELIVERED order the EXISTING lines are final — their
-    // billed quantities and items can't silently change (held pieces move via
-    // the resolutions applied above; swaps belong to the return flow). But
-    // NEW lines are allowed: the customer came back after delivery, returned
-    // pieces and bought more. Each new line must carry its fulfillment
-    // outcome (handed now / deliver later), applied in Phase 2, and the
-    // order's status follows from it. Order-level field edits (fees,
-    // customer, channel, prices, discounts) stay allowed here as before.
+    // Invariant 4: on a DELIVERED order the EXISTING lines keep their item
+    // and never shrink — held pieces move via the resolutions applied above,
+    // and swaps belong to the return flow. But a line CAN be RAISED: the
+    // extra pieces go over with the visit and become their OWN saleItems row
+    // in Phase 2 (same derivation a brand-new line gets — current price,
+    // current cost), so the order stays Delivered. NEW lines are allowed too:
+    // the customer came back after delivery, returned pieces and bought more.
+    // Each new line must carry its fulfillment outcome (handed now / deliver
+    // later), and the order's status follows from it. Order-level field edits
+    // (fees, customer, channel, prices, discounts) stay allowed as before.
     if (sale.status === "delivered") {
       const structural = plans.some(
-        (p) => p.kind === "existing" && (p.swapped || p.deltaBilled !== 0)
+        (p) => p.kind === "existing" && (p.swapped || p.deltaBilled < 0)
       );
       if (structural) {
         throw new ConvexError({
           code: "DELIVERED_LOCKED_LINES",
           message:
-            "This order is delivered — existing lines can't change. Return held pieces from the table, and add new items with the Add an item search.",
+            "This order is delivered — held pieces can be raised, but their item can't change and they can't be removed. Return them from the table first, or add new items with the Add an item search.",
         });
       }
     }
@@ -1953,10 +2047,6 @@ export const saveEdit = mutation({
       }
     }
 
-    const allItems = await ctx.db
-      .query("saleItems")
-      .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
-      .collect();
     const plannedByItem = new Map<string, Extract<LinePlan, { kind: "existing" }>>();
     for (const plan of plans) {
       if (plan.kind === "existing") plannedByItem.set(plan.item._id, plan);
@@ -1997,11 +2087,27 @@ export const saveEdit = mutation({
 
     // The order discount has to fit the order we're about to END UP with,
     // so the subtotal is measured across the planned lines plus the untouched
-    // ones — never the pre-edit figure.
+    // ones — never the pre-edit figure. A RAISED line splits: its billed
+    // pieces keep the edited line price and discount, but the extra pieces
+    // are priced at the variant's CURRENT price — that's what the new
+    // saleItems row gets in Phase 2 — so the enforced subtotal and the
+    // edit page's live display can never disagree.
     let subtotal = 0;
     for (const item of allItems) {
+      // Internal raise rows are folded into their parent's plan — counting
+      // them again here would double-bill the extra pieces.
+      if (item.splitFromItemId !== undefined) continue;
       const plan = plannedByItem.get(item._id);
-      subtotal += plan ? plan.price * plan.qty - plan.discount : lineValue(item);
+      if (!plan) {
+        subtotal += lineValue(item);
+      } else if (plan.deltaBilled > 0) {
+        subtotal +=
+          plan.price * plan.billedOld -
+          plan.discount +
+          (plan.variant!.price ?? plan.product!.defaultPrice) * plan.deltaBilled;
+      } else {
+        subtotal += plan.price * plan.qty - plan.discount;
+      }
     }
     for (const plan of plans) {
       if (plan.kind === "new") subtotal += plan.price * plan.qty - plan.discount;
@@ -2128,50 +2234,108 @@ export const saveEdit = mutation({
           });
         }
       } else if (plan.deltaBilled > 0) {
-        // More pieces leave the shelf. qtyOrdered grows rather than
-        // qtyCancelled shrinking — un-cancelling would rewrite what the
-        // ledger already says happened.
-        itemPatch.qtyOrdered = item.qtyOrdered + plan.deltaBilled;
+        // A raise is an ADD-ON, never a rewrite of the original line: the
+        // original saleItem keeps its qtyOrdered, its price and its
+        // historical cost snapshot, and the extra pieces become their OWN
+        // saleItems row — priced and costed fresh at the CURRENT server
+        // figures (the variant's current sell price, the current
+        // weighted-average cost), exactly like a brand-new line. The old
+        // cost snapshot must not leak onto the additional piece, and the
+        // ledger row points at the new line so each line's movements stay
+        // traceable. On a DELIVERED order the extra pieces went over with
+        // the visit, so the split line carries them as delivered on the
+        // spot; anywhere else they wait for delivery like any other line.
+        const currentPrice =
+          plan.variant!.price ?? plan.product!.defaultPrice;
+        const unitCostSnapshot = await weightedAvgCost(
+          ctx,
+          plan.variant!._id,
+          plan.variant!,
+          plan.product!
+        );
+        const raisedId = await ctx.db.insert("saleItems", {
+          saleId: sale._id,
+          variantId: item.variantId,
+          unitPrice: currentPrice,
+          unitCostSnapshot,
+          qtyOrdered: plan.deltaBilled,
+          qtyDelivered: sale.status === "delivered" ? plan.deltaBilled : 0,
+          qtyCancelled: 0,
+          qtyReturned: 0,
+          // Internal: getEditData folds this row back into the parent, and
+          // the parent's effective totals re-measure it on the next save.
+          splitFromItemId: item._id,
+        });
         await ctx.db.insert("stockLedger", {
           variantId: item.variantId,
           delta: -plan.deltaBilled,
           reason: "sale",
-          saleItemId: item._id,
+          saleItemId: raisedId,
           userId: staff._id,
           ts: now,
           note: `Sale ${sale.code}`,
         });
-      } else if (plan.deltaBilled < 0) {
-        // Fewer pieces: the difference is cancelled and goes back on the
-        // shelf, the same move `removeItem` makes for a whole line.
-        const back = -plan.deltaBilled;
-        itemPatch.qtyCancelled = item.qtyCancelled + back;
-        await ctx.db.insert("stockLedger", {
-          variantId: item.variantId,
-          delta: back,
-          reason: "cancel",
-          saleItemId: item._id,
-          userId: staff._id,
-          ts: now,
-          note: plan.qty === 0 ? `Removed — ${sale.code}` : `Removed ${back} — ${sale.code}`,
-        });
-      }
-
-      if (plan.deltaBilled !== 0) {
-        const removed = plan.qty === 0;
-        const readded = plan.billedOld === 0;
         await ctx.db.insert("saleEvents", {
           saleId: sale._id,
-          type: removed ? "item_removed" : readded ? "item_added" : "item_qty_changed",
+          type: "item_added",
+          summary: `Raised ${label} ×${plan.deltaBilled}.`,
+          payload: {
+            item: label,
+            qty: String(plan.deltaBilled),
+            // Marked so the history reads "extra pieces at today's price",
+            // not a plain new line.
+            raised: "true",
+          },
+          userId: staff._id,
+          ts: now,
+        });
+      } else if (plan.deltaBilled < 0) {
+        // Fewer pieces: the difference is cancelled and goes back on the
+        // shelf, the same move `removeItem` makes for a whole line. A raised
+        // line's extras live in separate internal rows, so the reduction
+        // consumes THOSE first (newest pieces first), then the parent's own
+        // billed — no row can ever go negative, and the merged event below
+        // stays in the quantities the user actually sees.
+        let back = -plan.deltaBilled;
+        const cancelRows = [...splitsByParent.get(item._id) ?? [], item];
+        for (const row of cancelRows) {
+          if (back === 0) break;
+          const cancellable =
+            row.qtyOrdered - row.qtyCancelled - row.qtyReturned;
+          const take = Math.min(back, cancellable);
+          if (take === 0) continue;
+          back -= take;
+          await ctx.db.patch(row._id, {
+            qtyCancelled: row.qtyCancelled + take,
+          });
+          await ctx.db.insert("stockLedger", {
+            variantId: row.variantId,
+            delta: take,
+            reason: "cancel",
+            saleItemId: row._id,
+            userId: staff._id,
+            ts: now,
+            note:
+              plan.qty === 0
+                ? `Removed — ${sale.code}`
+                : `Removed ${take} — ${sale.code}`,
+          });
+        }
+      }
+
+      // RAISES never reach here — the split branch above wrote its own
+      // item_added event. This block covers reductions only.
+      if (plan.deltaBilled < 0) {
+        const removed = plan.qty === 0;
+        await ctx.db.insert("saleEvents", {
+          saleId: sale._id,
+          type: removed ? "item_removed" : "item_qty_changed",
           summary: removed
             ? `Removed ${label} (${-plan.deltaBilled}).`
-            : readded
-              ? `Added ${label} ×${plan.qty}.`
-              : `Quantity ${label}: ${plan.billedOld} → ${plan.qty}.`,
-          payload:
-            removed || readded
-              ? { item: label, qty: String(Math.abs(plan.deltaBilled)) }
-              : { item: label, from: String(plan.billedOld), to: String(plan.qty) },
+            : `Quantity ${label}: ${plan.billedOld} → ${plan.qty}.`,
+          payload: removed
+            ? { item: label, qty: String(-plan.deltaBilled) }
+            : { item: label, from: String(plan.billedOld), to: String(plan.qty) },
           userId: staff._id,
           ts: now,
         });
@@ -2731,20 +2895,73 @@ export async function applyResolutions(
     });
   }
   const lines = new Map<Id<"saleItems">, Doc<"saleItems">>();
+  for (const r of byKey.values()) {
+    if (lines.has(r.saleItemId)) continue;
+    const item = await ctx.db.get(r.saleItemId);
+    if (!item || item.saleId !== sale._id) throw lineNotInSale();
+    lines.set(r.saleItemId, item);
+  }
+  // A raised line's extras live in separate internal rows (splitFromItemId),
+  // so a resolution sent against the MERGED line is expanded across the
+  // chain: the parent's held pieces resolve first, then its split rows' in
+  // creation order. Each expanded entry is validated per row below — the
+  // same bounds the standalone return flow enforces on individual rows.
+  const allRows = await ctx.db
+    .query("saleItems")
+    .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
+    .collect();
+  for (const r of [...byKey.values()]) {
+    const item = lines.get(r.saleItemId)!;
+    if (item.splitFromItemId !== undefined) continue; // direct row — as sent
+    const qty = assertQty(r.rawQty, 1, "resolution qty");
+    const chain = [
+      item,
+      ...allRows
+        .filter((row) => row.splitFromItemId === item._id)
+        .sort(
+          (a, b) =>
+            a._creationTime - b._creationTime || a._id.localeCompare(b._id)
+        ),
+    ];
+    const parts: { row: Doc<"saleItems">; take: number }[] = [];
+    let remaining = qty;
+    for (const row of chain) {
+      if (remaining === 0) break;
+      const take = Math.min(remaining, row.qtyDelivered - row.qtyReturned);
+      if (take > 0) parts.push({ row, take });
+      remaining -= take;
+    }
+    if (remaining > 0) {
+      throw new ConvexError({
+        code: "RETURN_EXCEEDS_HELD",
+        message: "Can't resolve more than the customer currently has.",
+      });
+    }
+    // Rewrite the entry per row — the parent's held first, then the splits.
+    byKey.delete(`${item._id}:${r.outcome}`);
+    for (const { row, take } of parts) {
+      lines.set(row._id, row);
+      const key = `${row._id}:${r.outcome}`;
+      const prev = byKey.get(key);
+      byKey.set(key, {
+        saleItemId: row._id,
+        outcome: r.outcome,
+        rawQty: (prev?.rawQty ?? 0) + take,
+        reason: r.reason,
+      });
+    }
+  }
+  // The SUM across ALL outcomes on a row may never exceed what the customer
+  // holds — a piece can only be resolved once (per-outcome bounds alone miss
+  // e.g. sellable 1 + incorrect 2 on a row holding 2).
   const totalByLine = new Map<Id<"saleItems">, number>();
   for (const r of byKey.values()) {
-    let item: Doc<"saleItems"> | null = lines.get(r.saleItemId) ?? null;
-    if (!item) {
-      item = await ctx.db.get(r.saleItemId);
-      if (!item || item.saleId !== sale._id) throw lineNotInSale();
-      lines.set(r.saleItemId, item);
-    }
-    const qty = assertQty(r.rawQty, 1, "resolution qty");
-    totalByLine.set(r.saleItemId, (totalByLine.get(r.saleItemId) ?? 0) + qty);
+    totalByLine.set(
+      r.saleItemId,
+      (totalByLine.get(r.saleItemId) ?? 0) +
+        assertQty(r.rawQty, 1, "resolution qty")
+    );
   }
-  // The SUM across ALL outcomes on a line may never exceed what the customer
-  // holds — a piece can only be resolved once (per-outcome bounds alone miss
-  // e.g. sellable 1 + incorrect 2 on a line holding 2).
   for (const [saleItemId, total] of totalByLine) {
     const item = lines.get(saleItemId)!;
     const held = item.qtyDelivered - item.qtyReturned;

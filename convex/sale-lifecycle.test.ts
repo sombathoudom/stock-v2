@@ -356,22 +356,27 @@ describe("sale lifecycle invariants", () => {
     );
     check("S3 new line on delivered without outcome rejected with INVALID_INPUT", "INVALID_INPUT", addCode);
 
-    const raiseCode = await errorCodeOf(
-      t.mutation(api.sales.saveEdit, {
-        saleId,
-        items: [{ saleItemId: lineId, qty: 2 }],
-      })
-    );
-    check("S3 qty change on delivered rejected with DELIVERED_LOCKED_LINES", "DELIVERED_LOCKED_LINES", raiseCode);
+    // Raises ARE legal on a delivered order: the extra piece goes over with
+    // the visit, split into its own delivered internal line (the delta rule:
+    // only the positive delta draws stock, priced/costed at today's figures).
+    const raised = await t.mutation(api.sales.saveEdit, {
+      saleId,
+      items: [{ saleItemId: lineId, qty: 2 }],
+    });
+    check("S3 raise on delivered allowed", "delivered", raised.sale.status);
+    const split = raised.items.find((i) => i.item.splitFromItemId === lineId)!;
+    check("S3 raise splits into a delivered internal line", 1, split.item.qtyDelivered);
+    check("S3 raise bumps the version", 1, raised.sale.editedVersion ?? 0);
 
-    // A fee-only edit stays legal (T14: the second-trip shipping charge).
+    // A fee-only edit stays legal (T14: the second-trip shipping charge) —
+    // the line now bills 2 (parent + split), so the no-op qty is 2.
     const fee = await t.mutation(api.sales.saveEdit, {
       saleId,
-      items: [{ saleItemId: lineId, qty: 1 }],
+      items: [{ saleItemId: lineId, qty: 2 }],
       deliveryFee: 500,
     });
     check("S3 fee-only edit on delivered allowed", 500, fee.sale.deliveryFee);
-    check("S3 fee-only edit bumps the version", 1, fee.sale.editedVersion ?? 0);
+    check("S3 fee-only edit bumps the version", 2, fee.sale.editedVersion ?? 0);
   });
 
   test("S4 — cancelled line: quantities stay in bounds, stock flows back", async () => {

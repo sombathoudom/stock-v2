@@ -341,6 +341,9 @@ export const saleItemDoc = v.object({
   qtyCancelled: v.number(),
   qtyReturned: v.number(),
   discount: v.optional(v.number()),
+  // Internal add-on rows written by saveEdit raises (see schema). The edit
+  // page never sees them — getEditData folds them into their parent.
+  splitFromItemId: v.optional(v.id("saleItems")),
 });
 
 export const paymentDoc = v.object({
@@ -517,7 +520,12 @@ export const refundInput = v.object({
 /** One line on the edit page: the line + what it sells + the numbers the
  * quantity box needs. `stock` is what's on the shelf right now; the pieces
  * already on this order were deducted long ago, so the highest quantity this
- * line can be raised to is `maxQty` = billed + shelf. */
+ * line can be raised to is `maxQty` = billed + shelf.
+ *
+ * A raise never rewrites the line: the extra pieces become their OWN saleItems
+ * row (saveEdit), priced at the variant's CURRENT sell price and costed at
+ * the CURRENT weighted average — `currentPrice` is that price, so the edit
+ * page's live totals price the raise exactly as the save will. */
 export const saleEditLine = v.object({
   item: saleItemDoc,
   variant: productVariantDoc,
@@ -525,6 +533,7 @@ export const saleEditLine = v.object({
   billedQty: v.number(),
   stock: v.number(),
   maxQty: v.number(),
+  currentPrice: v.number(),
   // What happened to the pieces that came back — derived from the ledger,
   // so the items table can say "Returned · Sellable" / "Returned · Damaged"
   // instead of a generic "Removed". null = this line has no return history.

@@ -805,10 +805,13 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     );
 
     // A stale/tampered client re-sends the returned line as an active line.
+    // The returned-line guard fires first (returned > 0 && qty > billedOld)
+    // and holds on EVERY status now — raises are legal on delivered orders,
+    // but a returned line stays read-only wherever it is.
     const code = await errorCodeOf(
       edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }])
     );
-    expect(code).toBe("DELIVERED_LOCKED_LINES");
+    expect(code).toBe("INVALID_QTY");
     // The refusal wrote nothing.
     expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
     expect(await stockOf(t, ids.teeM)).toBe(10);
