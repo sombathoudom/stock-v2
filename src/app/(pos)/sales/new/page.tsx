@@ -6,13 +6,15 @@ import {
   Refresh01Icon,
   ShoppingCart01Icon,
   Tick02Icon,
+  ShoppingBag
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-
+import Link from "next/link";
+import { cn } from "@/lib/utils";
 import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
 import {
@@ -29,7 +31,7 @@ import {
   type PaymentCheckoutPayload,
 } from "@/components/features/sales/pos-payment-dialog";
 import { PosVariantGrid } from "@/components/features/sales/pos-variant-grid";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -528,7 +530,11 @@ export default function NewSalePage() {
                 disabled={cart.length === 0}
                 onClick={() => setOrderOpen(true)}
               >
-                <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="size-4" />
+                <HugeiconsIcon
+                  icon={Tick02Icon}
+                  strokeWidth={2}
+                  className="size-4"
+                />
                 {t().sales.payNow}
               </Button>
             </div>
@@ -549,8 +555,25 @@ export default function NewSalePage() {
             className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
             onClick={() => router.push("/dashboard")}
           >
-            <HugeiconsIcon icon={Home01Icon} strokeWidth={2} className="size-5" />
+            <HugeiconsIcon
+              icon={Home01Icon}
+              strokeWidth={2}
+              className="size-5"
+            />
             {t().sales.home}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
+            onClick={() => router.push("/sales")}
+          >
+            <HugeiconsIcon
+              icon={Home01Icon}
+              strokeWidth={2}
+              className="size-5"
+            />
+            {t().sales.reviewSale}
           </Button>
           <Button
             type="button"
@@ -562,7 +585,11 @@ export default function NewSalePage() {
             onClick={() => setShowCart((v) => !v)}
           >
             <span className="relative">
-              <HugeiconsIcon icon={ShoppingCart01Icon} strokeWidth={2} className="size-5" />
+              <HugeiconsIcon
+                icon={ShoppingCart01Icon}
+                strokeWidth={2}
+                className="size-5"
+              />
               {cartQty > 0 && (
                 <span className="absolute -right-2.5 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-0.5 text-[10px] font-bold leading-none text-primary-foreground tabular-nums">
                   {cartQty > 99 ? "99+" : cartQty}
@@ -577,7 +604,11 @@ export default function NewSalePage() {
             className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
             onClick={resetPos}
           >
-            <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} className="size-5" />
+            <HugeiconsIcon
+              icon={Delete02Icon}
+              strokeWidth={2}
+              className="size-5"
+            />
             {t().sales.reset}
           </Button>
         </div>
@@ -585,39 +616,82 @@ export default function NewSalePage() {
         {/* Desktop bar — unchanged. */}
         <div className="hidden items-center gap-2 lg:flex">
           <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="size-11 shrink-0 px-0 sm:w-auto sm:px-3"
-              onClick={() => router.push("/dashboard")}
+            <Link
+              href="/dashboard"
               aria-label={t().sales.home}
+              className={cn(
+                buttonVariants({
+                  variant: "outline",
+                  size: "sm",
+                  className: "size-11 shrink-0 px-0 sm:h-9 sm:w-auto sm:px-3",
+                }),
+              )}
             >
-              <HugeiconsIcon icon={Home01Icon} strokeWidth={2} className="size-4" />
+              <HugeiconsIcon
+                icon={Home01Icon}
+                strokeWidth={2}
+                className="size-4"
+                aria-hidden="true"
+              />
               <span className="hidden sm:inline">{t().sales.home}</span>
-            </Button>
+            </Link>
+            <Link
+              href="/sales"
+              aria-label={t().sales.reviewSale}
+              className={cn(
+                buttonVariants({
+                  variant: "outline",
+                  size: "sm",
+                  className: "size-11 shrink-0 px-0 sm:h-9 sm:w-auto sm:px-3",
+                }),
+              )}
+            >
+              <HugeiconsIcon
+                icon={ShoppingBag}
+                strokeWidth={2}
+                className="size-4"
+                aria-hidden="true"
+              />
+              <span className="hidden sm:inline">{t().sales.reviewSale}</span>
+            </Link>
+
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="size-11 shrink-0 px-0 sm:w-auto sm:px-3"
+              className="size-11 shrink-0 px-0 sm:h-9 sm:w-auto sm:px-3"
               onClick={resetPos}
               aria-label={t().sales.reset}
             >
-              <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} className="size-4" />
+              <HugeiconsIcon
+                icon={Delete02Icon}
+                strokeWidth={2}
+                className="size-4"
+                aria-hidden="true"
+              />
+
               <span className="hidden sm:inline">{t().sales.reset}</span>
             </Button>
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="size-11 shrink-0 px-0 sm:w-auto sm:px-3"
+              className="size-11 shrink-0 px-0 sm:h-9 sm:w-auto sm:px-3"
               onClick={() => setRefreshTick((n) => n + 1)}
               aria-label={t().sales.refreshProducts}
             >
-              <HugeiconsIcon icon={Refresh01Icon} strokeWidth={2} className="size-4" />
-              <span className="hidden sm:inline">{t().sales.refreshProducts}</span>
+              <HugeiconsIcon
+                icon={Refresh01Icon}
+                strokeWidth={2}
+                className="size-4"
+                aria-hidden="true"
+              />
+
+              <span className="hidden sm:inline">
+                {t().sales.refreshProducts}
+              </span>
             </Button>
+
 
             {/* Subtotal — footer of the LEFT column. */}
             <div className="ml-1 min-w-0">
@@ -646,7 +720,11 @@ export default function NewSalePage() {
               disabled={cart.length === 0}
               onClick={() => setOrderOpen(true)}
             >
-              <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="size-4" />
+              <HugeiconsIcon
+                icon={Tick02Icon}
+                strokeWidth={2}
+                className="size-4"
+              />
               {t().sales.payNow}
             </Button>
           </div>

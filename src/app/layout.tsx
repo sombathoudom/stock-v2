@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import Script from "next/script";
 import { cookies } from "next/headers";
 import { Geist, Geist_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
@@ -8,7 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { getToken } from "@/lib/auth-server";
 import { cn, setServerLang } from "@/lib/utils";
 
-const ibmPlexSans = IBM_Plex_Sans({subsets:['latin'],variable:'--font-sans'});
+const ibmPlexSans = IBM_Plex_Sans({ subsets: ["latin"], variable: "--font-sans" });
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -34,27 +33,24 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   const lang = langCookie === "km" ? "km" : "en";
   setServerLang(lang);
   return (
+    // suppressHydrationWarning is required by next-themes — ThemeProvider
+    // adds the "dark" class on the client after reading localStorage, which
+    // would otherwise cause a hydration mismatch warning.
     <html
       lang={lang}
       suppressHydrationWarning
-      className={cn("h-full", "antialiased", geistSans.variable, geistMono.variable, "font-sans", ibmPlexSans.variable)}
+      className={cn(
+        "h-full antialiased",
+        geistSans.variable,
+        geistMono.variable,
+        ibmPlexSans.variable,
+        "font-sans",
+      )}
     >
-      <body className="min-h-full flex flex-col">
-        {/* Theme before first paint: the .dark class on <html> drives every
-            shadcn token (globals.css ships both sets). The saved choice — or
-            the OS preference — must be applied before React loads, so a
-            reload never flashes the wrong mode. next-themes (ThemeProvider in
-            ConvexClientProvider) reads the same localStorage "theme" key. */}
-        <Script id="theme-init" strategy="beforeInteractive">
-          {`try {
-            var t = localStorage.getItem("theme");
-            var dark = t === "dark" || (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-            if (dark) document.documentElement.classList.add("dark");
-          } catch (e) {}`}
-        </Script>
+      <body className="flex min-h-full flex-col">
         <ConvexClientProvider initialToken={token} lang={lang}>
           {children}
-          <Toaster />
+          <Toaster position="top-center"/>
         </ConvexClientProvider>
       </body>
     </html>
