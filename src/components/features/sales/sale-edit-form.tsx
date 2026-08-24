@@ -5,7 +5,7 @@ import { Cancel01Icon, Tick02Icon, Undo02Icon } from "@hugeicons/core-free-icons
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FormProvider, useController, useForm, useFormContext } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -58,6 +58,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { useShop } from "@/hooks/use-shop";
 import {
   centsToInput,
@@ -250,6 +251,10 @@ export function SaleEditForm({
   const deliveryEnabled = shop?.deliveryEnabled === true;
 
   const saveEdit = useMutation(api.sales.saveEdit);
+  const editSubmit = useIdempotentSubmit({
+    operation: "sales.saveEdit",
+    resource: data.sale._id,
+  });
   const channels = useQuery(api.channels.listActive, {});
   const companies = useQuery(api.deliveryCompanies.listActive, {});
 
@@ -265,6 +270,7 @@ export function SaleEditForm({
   const user = useCurrentUser();
   const [lines, setLines] = useState<EditLine[]>(() => toEditLines(data));
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   // Pending return/correction resolutions + refund — collected by the
   // resolution dialog and applied in the SAME save call (one transaction;
@@ -587,11 +593,12 @@ export function SaleEditForm({
   async function save(values: FormValues) {
     // Guard against a double click before the disabled state re-renders —
     // the second save would land on a bumped version and look like a conflict.
-    if (saving) return;
+    if (savingRef.current) return;
     if (rowErrors) {
       toast.error(labels.fixErrors);
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     try {
       // Only ids, quantities and intents cross the wire — the server re-derives
@@ -620,7 +627,7 @@ export function SaleEditForm({
         };
       });
 
-      await saveEdit({
+      const editPayload = {
         saleId: sale._id,
         // The version this page loaded — the server refuses the save when the
         // order changed in another window since (stale-edit guard).
@@ -663,12 +670,16 @@ export function SaleEditForm({
         ...(refundCents > 0
           ? { refund: { amount: refundCents, note: refundNote.trim() || undefined } }
           : {}),
-      });
+      };
+      const idempotencyKey = editSubmit.begin(editPayload);
+      await saveEdit({ ...editPayload, idempotencyKey });
+      editSubmit.complete(editPayload, idempotencyKey);
       toast.success(labels.saved);
       onDone();
     } catch (err) {
       toastError(err);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }

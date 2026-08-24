@@ -6,6 +6,12 @@ import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 
 const AUTH_USER_ID = "test-auth-user";
+let requestSequence = 0;
+
+function requestKey(operation: string) {
+  requestSequence += 1;
+  return `${operation}-${requestSequence}`;
+}
 
 // Sign-in is the ONE thing faked here (same stub as sales.test.ts): the
 // better-auth Convex component has no in-memory equivalent, so it always
@@ -333,6 +339,68 @@ describe("stock.variantHistory", () => {
     expect(toAug9.page[0].row.ts).toBe(localAug9Evening);
   });
 
+  test("sums every pre-range movement into the opening balance", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const beforeRangeStockIn = Date.UTC(2026, 7, 8, 4, 0);
+    const beforeRangeStockOut = Date.UTC(2026, 7, 9, 4, 0);
+    const inRangePurchase = Date.UTC(2026, 7, 10, 3, 0);
+    const inRangeSale = Date.UTC(2026, 7, 10, 5, 0);
+    const purchaseItemId = await t.run(async (ctx) => {
+      return await ctx.db.insert("purchaseItems", {
+        purchaseId: ids.purchaseId,
+        variantId: ids.variantMW,
+        qty: 4,
+        unitCost: 450,
+      });
+    });
+
+    await insertMovement(t, ids, {
+      variantId: ids.variantMW,
+      delta: 10,
+      reason: "adjustment",
+      ts: beforeRangeStockIn,
+    });
+    await insertMovement(t, ids, {
+      variantId: ids.variantMW,
+      delta: -3,
+      reason: "sale",
+      ts: beforeRangeStockOut,
+    });
+    await insertMovement(t, ids, {
+      variantId: ids.variantMW,
+      delta: 4,
+      reason: "purchase",
+      ts: inRangePurchase,
+      purchaseItemId,
+    });
+    await insertMovement(t, ids, {
+      variantId: ids.variantMW,
+      delta: -2,
+      reason: "sale",
+      ts: inRangeSale,
+    });
+
+    const history = await t.query(api.stock.variantHistory, {
+      variantId: ids.variantMW,
+      fromDay: "2026-08-10",
+      toDay: "2026-08-10",
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+
+    expect(history.summary).toEqual({ opening: 7, in: 4, out: 2, closing: 9 });
+    expect(history.page.map((item) => item.row.delta)).toEqual([-2, 4]);
+    const purchaseMovement = history.page.find(
+      (item) => item.row.purchaseItemId === purchaseItemId
+    );
+    expect(purchaseMovement?.row.delta).toBe(4);
+    expect(purchaseMovement?.reference).toMatchObject({
+      kind: "po",
+      purchaseId: ids.purchaseId,
+      unitCost: 450,
+    });
+  });
+
   test("rejects malformed day strings", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
@@ -350,6 +418,7 @@ describe("stock.variantHistory", () => {
     const ids = await seed(t);
     // A real checkout writes the saleItemId → sale reference itself.
     const sale = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
       customerId: ids.customerId,
       salesChannelId: ids.channelId,
       discount: 0,

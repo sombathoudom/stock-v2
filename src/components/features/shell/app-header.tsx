@@ -18,11 +18,11 @@ import {
 } from "@hugeicons/core-free-icons";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useTheme } from "next-themes";
 import { useEffect, useSyncExternalStore, useState } from "react";
 
 import type { Language } from "@/config/labels";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import { useTheme } from "@/components/theme-provider";
 import { authClient } from "@/lib/auth-client";
 import { cn, getLang, setLang, t, toastError } from "@/lib/utils";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -73,9 +73,8 @@ export function AppHeader({
     () => false,
   );
 
-  // Light/dark toggle — next-themes owns the .dark class on <html> and the
-  // saved choice (ConvexClientProvider); the init script in layout.tsx has
-  // already applied the real theme before first paint.
+  // Light/dark toggle — the shared theme provider owns the .dark class and
+  // persists the user's choice.
   const { resolvedTheme, setTheme, theme } = useTheme();
   const isDark = mounted && resolvedTheme === "dark";
   const toggleTheme = () => setTheme(resolvedTheme === "dark" ? "light" : "dark");
@@ -180,10 +179,8 @@ export function AppHeader({
           </Button>
         )}
 
-        {/* Language — the labels module reads localStorage per render and has
-            no reactive store, so switching reloads the page; filters and
-            pagination survive it via usePersistentState. The pos_lang cookie
-            keeps the server HTML and hydration in the same language. */}
+        {/* Language changes reload the page; filters and pagination survive it
+            via usePersistentState. The cookie keeps SSR and hydration aligned. */}
         <DropdownMenu>
           <DropdownMenuTrigger
             render={

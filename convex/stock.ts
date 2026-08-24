@@ -317,7 +317,6 @@ export const variantHistory = query({
     if (fromMs !== undefined) {
       for (const row of all) {
         if (row.ts < fromMs) opening += row.delta;
-        else break; // newest-first walk: everything older sits below
       }
     }
     let stockIn = 0;

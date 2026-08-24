@@ -18,6 +18,11 @@ import {
 } from "./helpers";
 import { variantQty } from "./stock";
 import {
+  checkIdempotency,
+  recordIdempotency,
+  replaySaleId,
+} from "./idempotency";
+import {
   checkoutLine,
   checkoutPayment,
   refundInput,
@@ -64,10 +69,11 @@ export async function assertStockCovers(
 }
 
 /**
- * Weighted-average cost of a variant at sale time (rule #3): the average
- * unit cost over the RECEIVED purchase batches currently feeding the shelf
- * (purchase ledger rows → their purchaseItems). Falls back to the variant
- * override, then the product's reference cost, when nothing was purchased.
+ * Moving weighted-average cost at sale time (rule #3), derived without a
+ * stored counter. Replay shelf quantity in ledger order; stock movements keep
+ * the current average, while each receipt blends its purchase-item cost with
+ * only the stock still on the shelf. Falls back to the reference cost when a
+ * malformed history does not provide enough purchase cost information.
  */
 export async function weightedAvgCost(
   ctx: { db: QueryCtx["db"] },
@@ -79,6 +85,12 @@ export async function weightedAvgCost(
     .query("stockLedger")
     .withIndex("by_variant_ts", (q) => q.eq("variantId", variantId))
     .collect();
+  rows.sort(
+    (a, b) =>
+      a.ts - b.ts ||
+      a._creationTime - b._creationTime ||
+      a._id.localeCompare(b._id)
+  );
   const purchaseItemIds = [
     ...new Set(
       rows
@@ -87,15 +99,30 @@ export async function weightedAvgCost(
     ),
   ];
   const items = await Promise.all(purchaseItemIds.map((id) => ctx.db.get(id)));
-  let totalQty = 0;
-  let totalCost = 0;
-  for (const item of items) {
-    if (!item) continue;
-    totalQty += item.qty;
-    totalCost += item.qty * item.unitCost;
+  const itemById = new Map(
+    items.filter((item) => item !== null).map((item) => [item._id, item] as const)
+  );
+  const fallbackCost = variant.cost ?? product.defaultCost;
+  let currentQty = 0;
+  let currentAverage: number | undefined;
+  for (const row of rows) {
+    if (row.reason === "purchase" && row.delta > 0 && row.purchaseItemId !== undefined) {
+      const item = itemById.get(row.purchaseItemId);
+      if (item?.variantId === variantId) {
+        if (currentQty <= 0) {
+          currentAverage = item.unitCost;
+        } else {
+          const shelfCost = currentAverage ?? fallbackCost;
+          currentAverage = Math.round(
+            (currentQty * shelfCost + row.delta * item.unitCost) /
+              (currentQty + row.delta)
+          );
+        }
+      }
+    }
+    currentQty += row.delta;
   }
-  if (totalQty > 0) return Math.round(totalCost / totalQty);
-  return variant.cost ?? product.defaultCost;
+  return currentAverage ?? fallbackCost;
 }
 
 /** Next display code "20260815-001" — shop-day based. Reading the day's
@@ -284,7 +311,12 @@ export async function buildDetail(
     .query("saleEvents")
     .withIndex("by_sale_ts", (q) => q.eq("saleId", sale._id))
     .collect();
-  eventDocs.sort((a, b) => b.ts - a.ts); // newest first
+  eventDocs.sort(
+    (a, b) =>
+      b.ts - a.ts ||
+      b._creationTime - a._creationTime ||
+      b._id.localeCompare(a._id)
+  ); // newest first, including deterministic same-timestamp ties
   const eventUserIds = [...new Set(eventDocs.map((e) => e.userId))];
   const eventUsers = await Promise.all(eventUserIds.map((id) => ctx.db.get(id)));
   const eventUserById = new Map(
@@ -314,6 +346,7 @@ export async function buildDetail(
 
 export const checkout = mutation({
   args: {
+    idempotencyKey: v.string(),
     customerId: v.id("customers"),
     salesChannelId: v.id("salesChannels"),
     deliveryCompanyId: v.optional(v.id("deliveryCompanies")),
@@ -328,6 +361,19 @@ export const checkout = mutation({
   returns: saleDetail,
   handler: async (ctx, args) => {
     const { staff } = await requireUser(ctx);
+    const { idempotencyKey, ...payload } = args;
+    const idempotency = await checkIdempotency(
+      ctx,
+      staff._id,
+      "sales.checkout",
+      idempotencyKey,
+      payload
+    );
+    if (idempotency.replay !== null) {
+      const sale = await ctx.db.get(replaySaleId(idempotency.replay));
+      if (!sale) throw notFoundSale();
+      return await buildDetail(ctx, sale);
+    }
     const shop = await getShop(ctx);
     const now = Date.now();
 
@@ -558,6 +604,14 @@ export const checkout = mutation({
       ts: createdAt,
     });
 
+    await recordIdempotency(
+      ctx,
+      staff._id,
+      "sales.checkout",
+      idempotencyKey,
+      idempotency.hash,
+      { kind: "sale", id: saleId }
+    );
     const sale = (await ctx.db.get(saleId))!;
     return await buildDetail(ctx, sale);
   },
@@ -1386,11 +1440,8 @@ export const setStatus = mutation({
     let now = Date.now();
     if (args.resolutions !== undefined) {
       await applyResolutions(ctx, sale, staff, args.resolutions, now);
+      now += 1;
     }
-    // Later events sort after the resolution events in the events index even
-    // when the same transaction lands in one millisecond (same-ts ties would
-    // order arbitrarily).
-    now += 1;
     if (args.refund !== undefined) {
       const shop = await getShop(ctx);
       await applyRefund(
@@ -1402,8 +1453,8 @@ export const setStatus = mutation({
         shop.timezone,
         now
       );
+      now += 1;
     }
-    now += 1;
     await transitionSaleStatus(
       ctx,
       sale,
@@ -1702,6 +1753,7 @@ async function logOrderFieldChanges(
 // matches is rejected — nobody silently overwrites somebody else's work.
 export const saveEdit = mutation({
   args: {
+    idempotencyKey: v.string(),
     saleId: v.id("sales"),
     items: v.array(saleEditItemInput),
     expectedVersion: v.optional(v.number()),
@@ -1723,6 +1775,19 @@ export const saveEdit = mutation({
   returns: saleDetail,
   handler: async (ctx, args) => {
     const { staff } = await requireUser(ctx);
+    const { idempotencyKey, ...payload } = args;
+    const idempotency = await checkIdempotency(
+      ctx,
+      staff._id,
+      "sales.saveEdit",
+      idempotencyKey,
+      payload
+    );
+    if (idempotency.replay !== null) {
+      const replayedSale = await ctx.db.get(replaySaleId(idempotency.replay));
+      if (!replayedSale) throw notFoundSale();
+      return await buildDetail(ctx, replayedSale);
+    }
     const shop = await getShop(ctx);
     const sale = await ctx.db.get(args.saleId);
     if (!sale) throw notFoundSale();
@@ -2446,6 +2511,14 @@ export const saveEdit = mutation({
       );
     }
 
+    await recordIdempotency(
+      ctx,
+      staff._id,
+      "sales.saveEdit",
+      idempotencyKey,
+      idempotency.hash,
+      { kind: "sale", id: sale._id }
+    );
     return await buildDetail(ctx, (await ctx.db.get(sale._id))!);
   },
 });
@@ -2543,6 +2616,8 @@ export async function fillAllDelivered(
   staff: Doc<"users">,
   now: number
 ): Promise<void> {
+  void staff;
+  void now;
   const items = await ctx.db
     .query("saleItems")
     .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
@@ -2706,8 +2781,8 @@ export const setLineDelivered = mutation({
 // derived difference qtyDelivered − qtyReturned (0 ≤ qtyReturned ≤
 // qtyDelivered holds by construction). A returned piece can never be
 // "un-delivered" again for a second stock credit. Giving money back is a
-// separate refund row — returning pieces and refunding are two deliberate
-// steps. Only pieces the customer actually holds can come back.
+// refund row committed with the return when requested. Only pieces the
+// customer actually holds can come back.
 //
 // THE SAME ENGINE is shared by the standalone return flow (`returnItems`
 // below), the Edit Sale page and the guided cancel review (resolutions via
@@ -3051,14 +3126,15 @@ export async function applyResolutions(
 }
 
 /** Standalone return flow (Sales list / order detail): returns pieces with
- * an optional separate refund — kept as a thin wrapper so every path runs
- * through the same engine. */
+ * an optional atomic refund — kept as a thin wrapper so every path runs
+ * through the same engines. */
 export const returnItems = mutation({
   args: {
     saleId: v.id("sales"),
     returns: v.array(
       v.object({ saleItemId: v.id("saleItems"), qty: v.number() })
     ),
+    refund: v.optional(refundInput),
   },
   returns: saleDetail,
   handler: async (ctx, args) => {
@@ -3070,6 +3146,18 @@ export const returnItems = mutation({
     }
     const now = Date.now();
     await applyReturns(ctx, sale, staff, args.returns, now);
+    if (args.refund !== undefined) {
+      const shop = await getShop(ctx);
+      await applyRefund(
+        ctx,
+        sale,
+        staff,
+        args.refund.amount,
+        args.refund.note,
+        shop.timezone,
+        now + 1
+      );
+    }
     return await buildDetail(ctx, (await ctx.db.get(sale._id))!);
   },
 });

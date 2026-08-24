@@ -2,6 +2,11 @@ import { ConvexError, v } from "convex/values";
 
 import { mutation } from "./_generated/server";
 import { assertCents, dayString, getShop, moneyStr, requireUser } from "./helpers";
+import {
+  checkIdempotency,
+  recordIdempotency,
+  replayPaymentId,
+} from "./idempotency";
 import { applyRefund, computeOwed, computePaid } from "./sales";
 import { checkoutPaymentMethod, paymentDoc } from "./types";
 
@@ -26,6 +31,7 @@ const badAmount = (message: string) =>
  */
 export const receive = mutation({
   args: {
+    idempotencyKey: v.string(),
     saleId: v.id("sales"),
     amount: v.number(),
     method: checkoutPaymentMethod,
@@ -35,6 +41,19 @@ export const receive = mutation({
   returns: paymentDoc,
   handler: async (ctx, args) => {
     const { staff } = await requireUser(ctx);
+    const { idempotencyKey, ...payload } = args;
+    const idempotency = await checkIdempotency(
+      ctx,
+      staff._id,
+      "payments.receive",
+      idempotencyKey,
+      payload
+    );
+    if (idempotency.replay !== null) {
+      const payment = await ctx.db.get(replayPaymentId(idempotency.replay));
+      if (!payment) throw new ConvexError({ code: "NOT_FOUND", message: "Payment not found." });
+      return payment;
+    }
     const shop = await getShop(ctx);
     const sale = await ctx.db.get(args.saleId);
     if (!sale) throw notFound();
@@ -104,6 +123,14 @@ export const receive = mutation({
       // "By <staff>" for explicit dates too (backdated or dialog-captured).
       ts: receivedAt,
     });
+    await recordIdempotency(
+      ctx,
+      staff._id,
+      "payments.receive",
+      idempotencyKey,
+      idempotency.hash,
+      { kind: "payment", id: paymentId }
+    );
     return (await ctx.db.get(paymentId))!;
   },
 });
@@ -117,6 +144,7 @@ export const receive = mutation({
  */
 export const refund = mutation({
   args: {
+    idempotencyKey: v.string(),
     saleId: v.id("sales"),
     amount: v.number(),
     note: v.optional(v.string()),
@@ -124,6 +152,19 @@ export const refund = mutation({
   returns: paymentDoc,
   handler: async (ctx, args) => {
     const { staff } = await requireUser(ctx);
+    const { idempotencyKey, ...payload } = args;
+    const idempotency = await checkIdempotency(
+      ctx,
+      staff._id,
+      "payments.refund",
+      idempotencyKey,
+      payload
+    );
+    if (idempotency.replay !== null) {
+      const payment = await ctx.db.get(replayPaymentId(idempotency.replay));
+      if (!payment) throw new ConvexError({ code: "NOT_FOUND", message: "Payment not found." });
+      return payment;
+    }
     const shop = await getShop(ctx);
     const sale = await ctx.db.get(args.saleId);
     if (!sale) throw notFound();
@@ -135,6 +176,14 @@ export const refund = mutation({
       args.note,
       shop.timezone,
       Date.now()
+    );
+    await recordIdempotency(
+      ctx,
+      staff._id,
+      "payments.refund",
+      idempotencyKey,
+      idempotency.hash,
+      { kind: "payment", id: paymentId }
     );
     return (await ctx.db.get(paymentId))!;
   },

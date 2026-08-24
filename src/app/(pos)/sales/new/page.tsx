@@ -11,7 +11,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
@@ -50,6 +51,7 @@ import {
 } from "@/components/ui/sheet";
 import { useCheckoutCart } from "@/hooks/use-checkout-cart";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import { printReceiptDoc, toastPrintError } from "@/lib/printing";
@@ -182,6 +184,16 @@ export default function NewSalePage() {
   const [invoice, setInvoice] = useState<SaleDetail | null>(null);
 
   const checkout = useMutation(api.sales.checkout);
+  const checkoutSubmit = useIdempotentSubmit({
+    operation: "sales.checkout",
+    resource: "new",
+  });
+
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
 
   // ④ Delivery company → shipping-fee auto-fill. The company's default fee
   // lands in the shipping input; a fee the cashier typed themselves is never
@@ -255,7 +267,7 @@ export default function NewSalePage() {
     setCompleting(true);
     try {
       const paid = amountCents > 0;
-      const detail = await checkout({
+      const checkoutPayload = {
         customerId: customer._id,
         salesChannelId: channelId as Id<"salesChannels">,
         ...(deliveryEnabled && companyId
@@ -293,7 +305,10 @@ export default function NewSalePage() {
           ? { createdAt: payload.createdAt }
           : {}),
         ...(payload.saleNote ? { note: payload.saleNote } : {}),
-      });
+      };
+      const idempotencyKey = checkoutSubmit.begin(checkoutPayload);
+      const detail = await checkout({ ...checkoutPayload, idempotencyKey });
+      checkoutSubmit.complete(checkoutPayload, idempotencyKey);
       toast.success(t().sales.saleCreated.replace("{code}", detail.sale.code));
       // Close the popup BEFORE opening the invoice — both portal at z-50 and
       // the invoice must not render under the order dialog.
@@ -419,13 +434,81 @@ export default function NewSalePage() {
     />
   );
 
+  const mobileFooter = (
+    <footer className="fixed inset-x-0 bottom-0 z-[100] border-t bg-background px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 lg:hidden">
+      <div className="grid grid-cols-5 items-center gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
+          onClick={() => router.push("/dashboard")}
+        >
+          <HugeiconsIcon icon={Home01Icon} strokeWidth={2} className="size-5" />
+          {t().sales.home}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
+          onClick={() => router.push("/sales")}
+        >
+          <HugeiconsIcon icon={ShoppingBag} strokeWidth={2} className="size-5" />
+          {t().sales.reviewSale}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          aria-pressed={showCart}
+          className={`flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal ${
+            showCart ? "bg-primary/5 text-primary" : "text-muted-foreground"
+          }`}
+          onClick={() => setShowCart((value) => !value)}
+        >
+          <span className="relative">
+            <HugeiconsIcon icon={ShoppingCart01Icon} strokeWidth={2} className="size-5" />
+            {cartQty > 0 ? (
+              <span className="absolute -right-2.5 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-0.5 text-[10px] font-bold leading-none text-primary-foreground tabular-nums">
+                {cartQty > 99 ? "99+" : cartQty}
+              </span>
+            ) : null}
+          </span>
+          {t().sales.cart}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
+          onClick={resetPos}
+        >
+          <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} className="size-5" />
+          {t().sales.reset}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-medium text-primary disabled:text-muted-foreground"
+          disabled={cart.length === 0}
+          onClick={() => setOrderOpen(true)}
+        >
+          <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="size-5" />
+          {t().sales.payNow}
+        </Button>
+      </div>
+    </footer>
+  );
+
   return (
-    <div className="flex h-dvh flex-col">
+    <div className="flex h-dvh min-h-0 flex-col overflow-x-clip bg-background">
       {/* HEADER — ONE flex row (POS-specific, same visual tokens as the
           shared PageToolbar): page title + customer picker + product
           filters (category + size/variant + search). Wraps only when
           space runs out on narrow screens. */}
-      <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-2 py-2 sm:px-4">
+      <div
+        className={cn(
+          "min-h-14 max-h-[45dvh] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 overflow-y-auto overscroll-contain border-b px-2 py-2 sm:px-4 lg:flex",
+          showCart ? "hidden" : "flex",
+        )}
+      >
         <div className="flex min-w-0 items-center gap-2">
           <HugeiconsIcon
             icon={ShoppingCart01Icon}
@@ -442,7 +525,12 @@ export default function NewSalePage() {
             onSelect={(c) => setCustomerId(c._id)}
           />
         </div>
-        <div className="flex-1">
+        <div
+          className={cn(
+            "min-w-0 flex-[2_1_20rem]",
+            showCart && "hidden lg:block",
+          )}
+        >
           <PosFilterBar
             search={search}
             onSearch={setSearch}
@@ -453,22 +541,19 @@ export default function NewSalePage() {
           />
         </div>
       </div>
-
       {/* BODY — two equal halves as flex. Both halves scroll independently;
           the RIGHT column scrolls only its items, never the whole page. */}
-      <section className="min-h-0 flex-1 p-2 sm:p-4">
-        <div className="flex h-full items-stretch gap-2 sm:gap-4">
+      <section className="min-h-0 flex-1 overflow-hidden p-2 sm:p-4">
+        <div className="flex h-full min-h-0 items-stretch gap-2 sm:gap-4">
           {/* LEFT — the product card grid, up to 4 per row. On the phone it
               hides while the cart section is open. */}
           <div
-            className={`min-h-0 flex-1 overflow-y-auto ${
-              showCart ? "hidden lg:block" : ""
-            }`}
+            className={cn(
+              "min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2",
+              showCart ? "hidden lg:block" : "",
+            )}
           >
             <PosVariantGrid
-              // A refresh remounts the grid: filters reload from storage
-              // (kept), pagination returns to page 1 and queries
-              // re-subscribe fresh.
               key={refreshTick}
               resetSignal={resetTick}
               currency={currency}
@@ -501,26 +586,30 @@ export default function NewSalePage() {
               It swaps in for the product grid when the footer's Cart item
               is active — same page, no redirect. */}
           <div
-            className={`${
-              showCart ? "flex" : "hidden"
-            } min-h-0 flex-1 flex-col gap-2 lg:hidden`}
+            className={cn(
+              showCart ? "flex" : "hidden",
+              "h-full min-h-0 flex-1 flex-col overflow-hidden lg:hidden",
+            )}
           >
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border p-2">
-              <PosCart
-                bare
-                lines={cart}
-                currency={currency}
-                onUpdate={updateLine}
-                onRemove={removeLine}
-              />
+            {/* Only this area scrolls. */}
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              <div className="rounded-md border p-2">
+                <PosCart
+                  bare
+                  lines={cart}
+                  currency={currency}
+                  onUpdate={updateLine}
+                  onRemove={removeLine}
+                />
+              </div>
             </div>
-            {amountsGrid("mobile")}
-            <div className="flex shrink-0 items-center gap-3 rounded-md border p-2">
+            <div className="mt-2 shrink-0">{amountsGrid("mobile")}</div>
+            <div className="mt-2 flex shrink-0 items-center gap-3 rounded-md border bg-background p-2">
               <div className="min-w-0">
                 <p className="text-xs text-muted-foreground">
                   {t().sales.totalPayable}
                 </p>
-                <p className="text-lg font-bold tabular-nums">
+                <p className="truncate text-lg font-bold tabular-nums">
                   {formatMoney(total, currency, getLang())}
                 </p>
               </div>
@@ -534,6 +623,7 @@ export default function NewSalePage() {
                   icon={Tick02Icon}
                   strokeWidth={2}
                   className="size-4"
+                  aria-hidden="true"
                 />
                 {t().sales.payNow}
               </Button>
@@ -541,78 +631,14 @@ export default function NewSalePage() {
           </div>
         </div>
       </section>
-
+      <div
+        aria-hidden="true"
+        className="h-[calc(4rem+env(safe-area-inset-bottom))] shrink-0 lg:hidden"
+      />
       {/* FOOTER — desktop: left Home / Reset / Refresh + Subtotal, right
-          Total Payable + Pay Now. Phone: a 3-item navigation bar (Home,
-          Cart, Reset) — Cart toggles the cart section on the same page
-          and is highlighted while it is open. Never scrolls away. */}
-      <div className="shrink-0 border-t bg-background px-2 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] sm:px-4">
-        {/* Phone navigation bar. */}
-        <div className="flex items-center gap-1 lg:hidden">
-          <Button
-            type="button"
-            variant="ghost"
-            className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
-            onClick={() => router.push("/dashboard")}
-          >
-            <HugeiconsIcon
-              icon={Home01Icon}
-              strokeWidth={2}
-              className="size-5"
-            />
-            {t().sales.home}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
-            onClick={() => router.push("/sales")}
-          >
-            <HugeiconsIcon
-              icon={Home01Icon}
-              strokeWidth={2}
-              className="size-5"
-            />
-            {t().sales.reviewSale}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            aria-pressed={showCart}
-            className={`flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal ${
-              showCart ? "bg-primary/5 text-primary" : "text-muted-foreground"
-            }`}
-            onClick={() => setShowCart((v) => !v)}
-          >
-            <span className="relative">
-              <HugeiconsIcon
-                icon={ShoppingCart01Icon}
-                strokeWidth={2}
-                className="size-5"
-              />
-              {cartQty > 0 && (
-                <span className="absolute -right-2.5 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-0.5 text-[10px] font-bold leading-none text-primary-foreground tabular-nums">
-                  {cartQty > 99 ? "99+" : cartQty}
-                </span>
-              )}
-            </span>
-            {t().sales.cart}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className="flex h-12 flex-1 flex-col items-center justify-center gap-0.5 px-0 text-[11px] font-normal text-muted-foreground"
-            onClick={resetPos}
-          >
-            <HugeiconsIcon
-              icon={Delete02Icon}
-              strokeWidth={2}
-              className="size-5"
-            />
-            {t().sales.reset}
-          </Button>
-        </div>
-
+          Total Payable + Pay Now. Phone keeps navigation and Pay Now always
+          reachable; Cart toggles the cart section on the same page. */}
+      <footer className="hidden shrink-0 border-t bg-background px-4 py-2 lg:block">
         {/* Desktop bar — unchanged. */}
         <div className="hidden items-center gap-2 lg:flex">
           <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
@@ -692,7 +718,6 @@ export default function NewSalePage() {
               </span>
             </Button>
 
-
             {/* Subtotal — footer of the LEFT column. */}
             <div className="ml-1 min-w-0">
               <p className="truncate text-xs text-muted-foreground">
@@ -729,8 +754,8 @@ export default function NewSalePage() {
             </Button>
           </div>
         </div>
-      </div>
-
+      </footer>
+      {mounted && !orderOpen ? createPortal(mobileFooter, document.body) : null}
       {/* Payment popup — one panel, two containers (2xl Dialog on desktop,
           bottom Sheet on phone; only the matching one ever opens). */}
       <Dialog
@@ -749,26 +774,28 @@ export default function NewSalePage() {
           {paymentPanel}
         </DialogContent>
       </Dialog>
-
       <Sheet
         open={orderOpen && !isDesktop}
         onOpenChange={(o) => {
           if (!o && !completing) setOrderOpen(false);
         }}
       >
-        <SheetContent side="bottom" className="max-h-[95dvh] gap-0 p-0">
+        <SheetContent
+          side="bottom"
+          className="gap-0 overflow-hidden p-0"
+          style={{ height: "95svh", maxHeight: "95svh" }}
+        >
           <SheetHeader className="shrink-0 border-b px-4 py-3 text-left">
             <SheetTitle>{t().sales.paymentCheckout}</SheetTitle>
             <SheetDescription className="sr-only">
               {t().sales.paymentCheckout}
             </SheetDescription>
           </SheetHeader>
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-4 pb-4 pt-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
             {paymentPanel}
           </div>
         </SheetContent>
       </Sheet>
-
       <InvoiceDialog
         detail={invoice}
         shopName={shop?.name ?? ""}

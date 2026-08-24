@@ -104,6 +104,9 @@ export const labels = {
       OUT_OF_STOCK: "Not enough stock for this item.",
       EMPTY_CART: "Cart is empty — add at least one item.",
       INVALID_PAYMENT: "Payment must be between 0 and the order total.",
+      IDEMPOTENCY_CONFLICT:
+        "This save was already submitted with different details. Review and submit again.",
+      INVALID_IDEMPOTENCY_KEY: "This save could not be identified. Refresh and try again.",
       // saveEdit's stale-edit guard (the order changed in another window).
       STALE_EDIT: "This order changed in another window. Reload and try again.",
       // Sale lifecycle guards — returns are bounded by what the customer
@@ -1161,6 +1164,8 @@ export const labels = {
       OUT_OF_STOCK: "មិនមានស្តុកគ្រប់គ្រាន់សម្រាប់ទំនិញនេះ។",
       EMPTY_CART: "កន្ត្រកទទេ — សូមបន្ថែមទំនិញយ៉ាងហោចមួយ។",
       INVALID_PAYMENT: "ការបង់ប្រាក់ត្រូវតែចន្លោះពី 0 ទៅសរុបនៃការបញ្ជាទិញ។",
+      IDEMPOTENCY_CONFLICT: "សំណើរក្សាទុកនេះត្រូវបានផ្ញើរួចជាមួយព័ត៌មានផ្សេង។ សូមពិនិត្យ ហើយផ្ញើម្តងទៀត។",
+      INVALID_IDEMPOTENCY_KEY: "មិនអាចកំណត់អត្តសញ្ញាណសំណើរក្សាទុកនេះបានទេ។ សូមផ្ទុកឡើងវិញ ហើយព្យាយាមម្តងទៀត។",
       STALE_EDIT: "ការបញ្ជាទិញនេះបានផ្លាស់ប្តូរនៅក្នុងវិនដូផ្សេង។ សូមផ្ទុកឡើងវិញ រួចព្យាយាមម្តងទៀត។",
       RETURN_EXCEEDS_HELD: "មិនអាចបង្វិលច្រើនជាងអ្វីដែលអតិថិជនកំពុងកាន់បានទេ។",
       DELIVERED_BELOW_RETURNED: "មិនអាចសម្គាល់ចំនួនដឹកជូនតិចជាងចំនួនដែលបានបង្វិលបានទេ។",

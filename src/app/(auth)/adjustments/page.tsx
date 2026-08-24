@@ -8,7 +8,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@convex/_generated/api";
@@ -27,6 +27,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import { useShop } from "@/hooks/use-shop";
 import { cn, formatDateTime, getLang, imageUrl, t, toastError } from "@/lib/utils";
@@ -149,6 +150,12 @@ function QuickAdjustment({
   const [qtyText, setQtyText] = useState("");
   const [note, setNote] = useState("");
   const adjust = useMutation(api.adjustments.adjustStock);
+  const adjustSubmit = useIdempotentSubmit({
+    operation: "adjustments.adjustStock",
+    resource: selectedId ?? "unselected",
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   const term = search.trim().toLowerCase();
   const filtered = useMemo(
@@ -160,25 +167,35 @@ function QuickAdjustment({
   const qty = Number(qtyText);
   const qtyOk = Number.isInteger(qty) && qty >= 1;
   const oversell = direction === "out" && selected !== null && qtyOk && qty > selected.qty;
-  const canSave = selected !== null && qtyOk && !oversell && note.trim().length > 0;
+  const canSave =
+    !submitting && selected !== null && qtyOk && !oversell && note.trim().length > 0;
 
   async function submit() {
+    if (submittingRef.current) return;
     if (!selected) {
       toast.error(t().adjustments.pickFirst);
       return;
     }
+    submittingRef.current = true;
+    setSubmitting(true);
     try {
-      await adjust({
+      const adjustPayload = {
         variantId: selected.variantId,
         delta: direction === "in" ? qty : -qty,
         note: note.trim(),
-      });
+      };
+      const idempotencyKey = adjustSubmit.begin(adjustPayload);
+      await adjust({ ...adjustPayload, idempotencyKey });
+      adjustSubmit.complete(adjustPayload, idempotencyKey);
       toast.success(t().adjustments.adjustmentSaved);
       setSelectedId(null);
       setQtyText("");
       setNote("");
     } catch (err) {
       toastError(err);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   }
 
@@ -388,6 +405,8 @@ function StocktakePanel({
   // the owner only types what actually differs on the shelf.
   const [counts, setCounts] = useState<Map<string, string>>(new Map());
   const record = useMutation(api.adjustments.recordStocktake);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const term = search.trim().toLowerCase();
   const filtered = useMemo(
@@ -420,13 +439,18 @@ function StocktakePanel({
       variantId: item.variantId,
       countedQty: Number(counts.get(item.variantId)),
     }));
-    if (rows.length === 0) return;
+    if (savingRef.current || rows.length === 0) return;
+    savingRef.current = true;
+    setSaving(true);
     try {
       const result = await record({ rows });
       toast.success(t().adjustments.stocktakeSaved.replace("{n}", String(result.written)));
       setCounts(new Map());
     } catch (err) {
       toastError(err);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   }
 
@@ -507,14 +531,14 @@ function StocktakePanel({
 
       {/* Sticky footer: submit bottom-left + colored cancel with icon */}
       <div className="sticky bottom-3 z-10 flex items-center gap-2 rounded-lg border bg-card p-3 shadow-md">
-        <Button onClick={save} disabled={differences.length === 0}>
+        <Button onClick={save} disabled={saving || differences.length === 0}>
           {t().adjustments.saveStocktake}
         </Button>
         <Button
           type="button"
           variant="destructive"
           onClick={() => setCounts(new Map())}
-          disabled={differences.length === 0}
+          disabled={saving || differences.length === 0}
         >
           <HugeiconsIcon icon={RotateCwSquareIcon} size={16} />
           {t().common.cancel}

@@ -127,10 +127,8 @@ function StockLoader({ id }: { id: string }) {
     "all",
   );
   const [sort, setSort] = usePersistentState<QtySort>("stockDetail:sort", "none");
-  // The target persists after close so the movement query inside the sheet
-  // stays subscribed (warm cache — a reopen renders instantly instead of
-  // refetching). Picking a different variant replaces it, and the sheet's
-  // sheetKey logic resets its filters/pagination on that change.
+  // Keep the selected target after close so reopening remembers the variant.
+  // The history query itself pauses while closed to avoid hidden rerenders.
   const [sheetTarget, setSheetTarget] = useState<VariantSheetTarget | null>(
     null,
   );

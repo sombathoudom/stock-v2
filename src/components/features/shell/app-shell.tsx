@@ -210,7 +210,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main
         className={cn(
           "min-h-dvh w-full transition-all",
-          bottomItems.length > 0 && "pb-16 md:pb-0",
+          bottomItems.length > 0 &&
+            "pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-0",
           effectiveCollapsed ? "md:ps-14" : "md:ps-64",
         )}
       >

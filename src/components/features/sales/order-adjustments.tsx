@@ -3,7 +3,7 @@
 import { Cancel01Icon, PackageReceive01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation } from "convex/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@convex/_generated/api";
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { cn, inputToCents, t, toastError } from "@/lib/utils";
 import type { SaleDetail } from "./invoice-dialog";
 
@@ -61,13 +62,15 @@ export function AdjustDeliveryDialog({
     Object.fromEntries(items.map(({ item }) => [item._id, item.qtyDelivered]))
   );
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const changes = items.filter(
     ({ item }) => (qtys[item._id] ?? item.qtyDelivered) !== item.qtyDelivered
   );
 
   async function save() {
-    if (changes.length === 0) return;
+    if (savingRef.current || changes.length === 0) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       await setLineDelivered({
@@ -82,6 +85,7 @@ export function AdjustDeliveryDialog({
     } catch (err) {
       toastError(err);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -227,6 +231,10 @@ export function ReturnItemDialog({
 }) {
   const returnItems = useMutation(api.sales.returnItems);
   const refund = useMutation(api.payments.refund);
+  const refundSubmit = useIdempotentSubmit({
+    operation: "payments.refund",
+    resource: saleId,
+  });
   // Pieces currently in the customer's hands are the only ones that can come
   // back — the server enforces the same bound (withCustomer is the derived
   // qtyDelivered − qtyReturned, never the historical delivered count).
@@ -234,10 +242,12 @@ export function ReturnItemDialog({
   const [qty, setQty] = useState(1);
   const [refundInput, setRefundInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const refundCents = inputToCents(refundInput) ?? 0;
 
   async function save() {
-    if (!line || qty < 1) return;
+    if (savingRef.current || !line || qty < 1) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       await returnItems({
@@ -245,17 +255,21 @@ export function ReturnItemDialog({
         returns: [{ saleItemId: line.item._id, qty }],
       });
       if (refundCents > 0) {
-        await refund({
+        const refundPayload = {
           saleId,
           amount: refundCents,
           note: `Return — ${lineLabel(line)} ×${qty}`,
-        });
+        };
+        const idempotencyKey = refundSubmit.begin(refundPayload);
+        await refund({ ...refundPayload, idempotencyKey });
+        refundSubmit.complete(refundPayload, idempotencyKey);
       }
       toast.success(t().sales.itemsReturned);
       onClose();
     } catch (err) {
       toastError(err);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }

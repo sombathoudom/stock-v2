@@ -3,6 +3,11 @@ import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import { assertDelta, assertQty, requireUser } from "./helpers";
+import {
+  checkIdempotency,
+  recordIdempotency,
+  replayStockLedgerId,
+} from "./idempotency";
 import { variantLabel } from "./sales";
 import { variantQty } from "./stock";
 import {
@@ -36,6 +41,7 @@ function cleanNote(text: string | undefined): string {
 // answers "why did this move?".
 export const adjustStock = mutation({
   args: {
+    idempotencyKey: v.string(),
     variantId: v.id("productVariants"),
     // signed: + in, − out. Bounded by assertDelta below (rejects NaN,
     // Infinity and anything outside ±1_000_000) before any DB use.
@@ -45,6 +51,21 @@ export const adjustStock = mutation({
   returns: stockLedgerDoc,
   handler: async (ctx, args) => {
     const { staff } = await requireUser(ctx);
+    const { idempotencyKey, ...payload } = args;
+    const idempotency = await checkIdempotency(
+      ctx,
+      staff._id,
+      "adjustments.adjustStock",
+      idempotencyKey,
+      payload
+    );
+    if (idempotency.replay !== null) {
+      const row = await ctx.db.get(replayStockLedgerId(idempotency.replay));
+      if (!row) {
+        throw new ConvexError({ code: "NOT_FOUND", message: "Stock movement not found." });
+      }
+      return row;
+    }
     const delta = assertDelta(args.delta);
     const note = cleanNote(args.note);
     if (!note) {
@@ -69,6 +90,14 @@ export const adjustStock = mutation({
       ts: Date.now(),
       note,
     });
+    await recordIdempotency(
+      ctx,
+      staff._id,
+      "adjustments.adjustStock",
+      idempotencyKey,
+      idempotency.hash,
+      { kind: "stockLedger", id: rowId }
+    );
     return (await ctx.db.get(rowId))!;
   },
 });
@@ -141,6 +170,7 @@ export const stocktakeList = query({
       productId: Id<"products">;
       label: string;
       qty: number;
+      imageStorageId?: Id<"_storage">;
     }[] = [];
     for (const product of products) {
       if (!product.active) continue;

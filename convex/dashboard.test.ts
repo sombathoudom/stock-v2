@@ -9,6 +9,12 @@ import { dayRange } from "./sales";
 import schema from "./schema";
 
 const AUTH_USER_ID = "test-auth-user";
+let requestKeySequence = 0;
+
+function requestKey(operation: string): string {
+  requestKeySequence += 1;
+  return `${operation}-${requestKeySequence}`;
+}
 
 // Sign-in is the ONE thing faked here — the same stub as the other test
 // files. `requireUser` still resolves the seeded staff row, so everything
@@ -188,7 +194,18 @@ async function seed(t: ReturnType<typeof convexTest>) {
       note: "damaged",
     });
 
-    return { userId, customerA, customerB, channelId, supplierId, productId, variantM, variantL, variantS, variantXL };
+    return {
+      userId,
+      customerA,
+      customerB,
+      channelId,
+      supplierId,
+      productId,
+      variantM,
+      variantL,
+      variantS,
+      variantXL,
+    };
   });
 }
 
@@ -199,7 +216,7 @@ async function addPayment(
   userId: Id<"users">,
   saleId: Id<"sales">,
   amount: number,
-  day: string
+  day: string,
 ) {
   await t.run(async (ctx: MutationCtx) => {
     await ctx.db.insert("payments", {
@@ -218,7 +235,7 @@ async function addExpense(
   userId: Id<"users">,
   amount: number,
   day: string,
-  category = "Rent"
+  category = "Rent",
 ) {
   await t.run(async (ctx: MutationCtx) => {
     await ctx.db.insert("expenses", {
@@ -236,9 +253,11 @@ async function addExpense(
 async function createSale(
   t: ReturnType<typeof convexTest>,
   ids: Seed,
-  lines: { variantId: Id<"productVariants">; qty: number }[]
+  lines: { variantId: Id<"productVariants">; qty: number }[],
+  idempotencyKey = requestKey("checkout"),
 ) {
   return await t.mutation(api.sales.checkout, {
+    idempotencyKey,
     customerId: ids.customerA,
     salesChannelId: ids.channelId,
     discount: 0,
@@ -272,7 +291,7 @@ async function insertSale(
       qtyCancelled?: number;
       qtyReturned?: number;
     }[];
-  }
+  },
 ) {
   return await t.run(async (ctx: MutationCtx) => {
     const saleId = await ctx.db.insert("sales", {
@@ -306,12 +325,16 @@ describe("dashboard.getOverview — ranges", () => {
   test("today: 7 rolling chart buckets ending today, KPI counts only today", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     const day = today();
     await addPayment(t, ids.userId, sale.sale._id, 1000, day);
     await addPayment(t, ids.userId, sale.sale._id, 2000, addDays(day, -3));
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     expect(overview.fromDay).toBe(day);
     expect(overview.toDay).toBe(addDays(day, 1));
@@ -327,7 +350,9 @@ describe("dashboard.getOverview — ranges", () => {
   test("7d: from today − 6 days; the boundary day counts, the day before does not", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     const day = today();
     await addPayment(t, ids.userId, sale.sale._id, 1000, addDays(day, -6));
     await addPayment(t, ids.userId, sale.sale._id, 3000, addDays(day, -7));
@@ -344,7 +369,9 @@ describe("dashboard.getOverview — ranges", () => {
   test("30d: from today − 29 days; boundary included, −30 excluded", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     const day = today();
     await addPayment(t, ids.userId, sale.sale._id, 1000, addDays(day, -29));
     await addPayment(t, ids.userId, sale.sale._id, 3000, addDays(day, -30));
@@ -359,11 +386,19 @@ describe("dashboard.getOverview — ranges", () => {
   test("mtd: from the first of the month", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     const day = today();
     const monthFirst = `${day.slice(0, 8)}01`;
     await addPayment(t, ids.userId, sale.sale._id, 1000, monthFirst);
-    await addPayment(t, ids.userId, sale.sale._id, 3000, addDays(monthFirst, -1));
+    await addPayment(
+      t,
+      ids.userId,
+      sale.sale._id,
+      3000,
+      addDays(monthFirst, -1),
+    );
 
     const overview = await t.query(api.dashboard.getOverview, { range: "mtd" });
 
@@ -374,11 +409,19 @@ describe("dashboard.getOverview — ranges", () => {
   test("ytd: monthly buckets January → now; Jan 1 counts, Dec 31 doesn't", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     const day = today();
     const year = day.slice(0, 4);
     await addPayment(t, ids.userId, sale.sale._id, 1000, `${year}-01-01`);
-    await addPayment(t, ids.userId, sale.sale._id, 3000, `${Number(year) - 1}-12-31`);
+    await addPayment(
+      t,
+      ids.userId,
+      sale.sale._id,
+      3000,
+      `${Number(year) - 1}-12-31`,
+    );
 
     const overview = await t.query(api.dashboard.getOverview, { range: "ytd" });
 
@@ -387,7 +430,9 @@ describe("dashboard.getOverview — ranges", () => {
     expect(overview.chart.type).toBe("month");
     expect(overview.chart.buckets[0].key).toBe(`${year}-01`);
     expect(overview.chart.buckets).toHaveLength(Number(day.slice(5, 7)));
-    expect(overview.chart.buckets.at(-1)!.key).toBe(`${year}-${day.slice(5, 7)}`);
+    expect(overview.chart.buckets.at(-1)!.key).toBe(
+      `${year}-${day.slice(5, 7)}`,
+    );
     expect(overview.chart.buckets[0].sales).toBe(1000);
   });
 });
@@ -415,19 +460,33 @@ describe("dashboard.getOverview — purchases", () => {
       };
     });
     await t.run(async (ctx: MutationCtx) => {
-      const mk = (purchaseId: Id<"purchases">, variantId: Id<"productVariants">, qty: number, unitCost: number) =>
-        ctx.db.insert("purchaseItems", { purchaseId, variantId, qty, unitCost });
+      const mk = (
+        purchaseId: Id<"purchases">,
+        variantId: Id<"productVariants">,
+        qty: number,
+        unitCost: number,
+      ) =>
+        ctx.db.insert("purchaseItems", {
+          purchaseId,
+          variantId,
+          qty,
+          unitCost,
+        });
       await mk(inRange, ids.variantM, 10, 400);
       await mk(inRange, ids.variantL, 5, 500);
     });
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     // 10@$4 + 5@$5 = $65.00 — the draft and the 40-day-old purchase drop out.
     expect(overview.kpis.purchases).toBe(6500);
     const todayBucket = overview.chart.buckets.find((b) => b.key === day);
     expect(todayBucket!.purchases).toBe(6500); // KPI and chart agree
-    expect(overview.chart.buckets.reduce((s, b) => s + b.purchases, 0)).toBe(6500);
+    expect(overview.chart.buckets.reduce((s, b) => s + b.purchases, 0)).toBe(
+      6500,
+    );
   });
 });
 
@@ -435,13 +494,17 @@ describe("dashboard.getOverview — profit", () => {
   test("matches the reports page for the same day (payment + refund + expense)", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]); // $20 total
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]); // $20 total
     const day = today();
     await addPayment(t, ids.userId, sale.sale._id, 2000, day);
     await addPayment(t, ids.userId, sale.sale._id, -500, day); // refund
     await addExpense(t, ids.userId, 300, day);
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
     const report = await t.query(api.reports.getPlReport, {
       period: { type: "day", value: day },
     });
@@ -458,14 +521,25 @@ describe("dashboard.getOverview — sales due", () => {
   test("sums remaining across owing orders; fully paid and cancelled excluded", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const halfPaid = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]); // $20
+    const halfPaid = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]); // $20
     await addPayment(t, ids.userId, halfPaid.sale._id, 500, today());
-    const settled = await createSale(t, ids, [{ variantId: ids.variantL, qty: 1 }]); // $10
+    const settled = await createSale(t, ids, [
+      { variantId: ids.variantL, qty: 1 },
+    ]); // $10
     await addPayment(t, ids.userId, settled.sale._id, 1000, today());
-    const cancelled = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
-    await t.mutation(api.sales.setStatus, { saleId: cancelled.sale._id, status: "cancelled" });
+    const cancelled = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
+    await t.mutation(api.sales.setStatus, {
+      saleId: cancelled.sale._id,
+      status: "cancelled",
+    });
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     expect(overview.kpis.salesDue).toBe(1500);
   });
@@ -501,7 +575,9 @@ describe("dashboard.getOverview — top products", () => {
       lines: [{ variantId: ids.variantM, unitPrice: 1000, qtyOrdered: 2 }],
     });
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     expect(overview.topProducts).toHaveLength(2);
     const [m, l] = overview.topProducts;
@@ -519,7 +595,9 @@ describe("dashboard.getOverview — top customers", () => {
   test("nets refunds per customer and excludes out-of-range payments", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const saleA = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const saleA = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     const day = today();
     await addPayment(t, ids.userId, saleA.sale._id, 2000, day);
     await addPayment(t, ids.userId, saleA.sale._id, -500, day);
@@ -551,7 +629,9 @@ describe("dashboard.getOverview — top customers", () => {
     });
     await addPayment(t, ids.userId, saleBId, 1000, day);
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     expect(overview.topCustomers).toHaveLength(2);
     expect(overview.topCustomers[0].name).toBe("Dara");
@@ -566,7 +646,9 @@ describe("dashboard.getOverview — stock value", () => {
     const t = convexTest(schema, modules);
     await seed(t);
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     // M: 20 × $5.00 avg = $100.00 · L: 10 × $4.00 = $40.00 · S: 5 × $3.50
     // override (no purchase) = $17.50 · XL: shelf −3 → counts zero.
@@ -589,9 +671,15 @@ describe("dashboard.getOverview — invoices & recent sales", () => {
       });
     }
     await insertSale(t, ids, { code: "OLD", createdDay: addDays(day, -40) });
-    await insertSale(t, ids, { code: "DRAFT", createdDay: day, status: "draft" });
+    await insertSale(t, ids, {
+      code: "DRAFT",
+      createdDay: day,
+      status: "draft",
+    });
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     expect(overview.kpis.invoices).toBe(6); // drafts are not invoices
     expect(overview.recentSales).toHaveLength(5);
@@ -653,10 +741,15 @@ describe("dashboard.getOverview — low stock", () => {
       return { tinyId };
     });
 
-    const overview = await t.query(api.dashboard.getOverview, { range: "today" });
+    const overview = await t.query(api.dashboard.getOverview, {
+      range: "today",
+    });
 
     // XL's shelf is −3, the new pair is 1 — worst (lowest) first.
-    expect(overview.lowStock.map((i) => i.variantId)).toEqual([ids.variantXL, tinyId]);
+    expect(overview.lowStock.map((i) => i.variantId)).toEqual([
+      ids.variantXL,
+      tinyId,
+    ]);
     expect(overview.lowStock[0].qty).toBe(-3);
     expect(overview.lowStock[1].qty).toBe(1);
   });

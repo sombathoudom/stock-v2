@@ -1,0 +1,85 @@
+import { describe, expect, test } from "vitest";
+
+import {
+  addCartLine,
+  type CartLine,
+} from "./use-checkout-cart";
+
+const variant = (
+  variantId: string,
+  stock: number,
+  discount = ""
+): Omit<CartLine, "key"> => ({
+  variantId,
+  label: variantId,
+  price: 500,
+  qty: 1,
+  discount,
+  stock,
+});
+
+describe("addCartLine", () => {
+  test("keeps repeated adds as separate lines with unique keys", () => {
+    const first = addCartLine([], variant("v-shirt", 2), "line-1");
+    const second = addCartLine(first, variant("v-shirt", 2), "line-2");
+
+    expect(second).toHaveLength(2);
+    expect(second.map((line) => line.key)).toEqual(["line-1", "line-2"]);
+    expect(second.map((line) => line.qty)).toEqual([1, 1]);
+  });
+
+  test("caps aggregate quantity for the same variant at its stock snapshot", () => {
+    const first = addCartLine([], variant("v-shirt", 2), "line-1");
+    const second = addCartLine(first, variant("v-shirt", 2), "line-2");
+    const overStock = addCartLine(second, variant("v-shirt", 2), "line-3");
+
+    expect(overStock).toBe(second);
+    expect(overStock.reduce((total, line) => total + line.qty, 0)).toBe(2);
+  });
+
+  test("counts a discounted existing line toward stock without merging it", () => {
+    const discounted = addCartLine(
+      [],
+      variant("v-shirt", 2, "1.00"),
+      "discounted"
+    );
+    const added = addCartLine(discounted, variant("v-shirt", 2), "regular");
+    const overStock = addCartLine(added, variant("v-shirt", 2), "extra");
+
+    expect(added.map((line) => line.discount)).toEqual(["1.00", ""]);
+    expect(overStock).toBe(added);
+  });
+
+  test("tracks stock independently for different variants", () => {
+    const shirt = addCartLine([], variant("v-shirt", 1), "shirt");
+    const trousers = addCartLine(shirt, variant("v-trousers", 1), "trousers");
+
+    expect(trousers.map((line) => line.variantId)).toEqual([
+      "v-shirt",
+      "v-trousers",
+    ]);
+  });
+
+  test("does not add an out-of-stock variant", () => {
+    const current = addCartLine([], variant("v-shirt", 1), "shirt");
+    const result = addCartLine(current, variant("v-socks", 0), "socks");
+
+    expect(result).toBe(current);
+  });
+
+  test("does not mutate the input cart or its lines", () => {
+    const existing: CartLine = {
+      ...variant("v-shirt", 2),
+      key: "existing",
+    };
+    const current = [existing];
+    const snapshot = structuredClone(current);
+
+    const result = addCartLine(current, variant("v-shirt", 2), "new");
+
+    expect(current).toEqual(snapshot);
+    expect(current[0]).toBe(existing);
+    expect(result).not.toBe(current);
+    expect(result[0]).toBe(existing);
+  });
+});

@@ -4,7 +4,8 @@ import { Cancel01Icon, MoneyAdd01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "convex/react";
-import { useState } from "react";
+import type { FormEvent } from "react";
+import { useRef, useState } from "react";
 import { FormProvider, useForm, useWatch } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -23,6 +24,7 @@ import { FormDate } from "@/components/features/forms/form-date";
 import { FormInput } from "@/components/features/forms/form-input";
 import { FormMoney, moneyInputSchema } from "@/components/features/forms/form-money";
 import { FormSelect } from "@/components/features/forms/form-select";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import {
   centsToInput,
   formatMoney,
@@ -76,6 +78,10 @@ export function SalePaymentDialog({
   onClose: () => void;
 }) {
   const receive = useMutation(api.payments.receive);
+  const receiveSubmit = useIdempotentSubmit({
+    operation: "payments.receive",
+    resource: saleId,
+  });
 
   // Captured once on mount — the payment date defaults to NOW (the actual
   // receipt moment) and is capped at today (backdating allowed, future
@@ -96,17 +102,23 @@ export function SalePaymentDialog({
   const amountValue = useWatch({ control: form.control, name: "amount" });
   const entered = inputToCents(amountValue ?? "") ?? 0;
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   async function save(values: FormValues) {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     try {
-      await receive({
+      const receivePayload = {
         saleId,
         amount: entered,
         method: values.method,
         receivedAt: values.receivedAt,
         note: values.note.trim() || undefined,
-      });
+      };
+      const idempotencyKey = receiveSubmit.begin(receivePayload);
+      await receive({ ...receivePayload, idempotencyKey });
+      receiveSubmit.complete(receivePayload, idempotencyKey);
       toast.success(
         entered > remaining
           ? t().sales.paymentAddedWithChange.replace(
@@ -119,8 +131,17 @@ export function SalePaymentDialog({
     } catch (err) {
       toastError(err);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
+  }
+
+  function submit(values: FormValues) {
+    void save(values);
+  }
+
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    void form.handleSubmit(submit)(event);
   }
 
   const methodOptions: { value: CheckoutMethod; label: string }[] = [
@@ -137,7 +158,7 @@ export function SalePaymentDialog({
         </DialogHeader>
         <FormProvider {...form}>
           <form
-            onSubmit={form.handleSubmit((values) => void save(values))}
+            onSubmit={onSubmit}
             className="flex flex-col gap-4"
             noValidate
           >

@@ -20,6 +20,12 @@ import schema from "./schema";
 // immutable ledger rows + saleEvents in ONE transaction.
 
 const AUTH_USER_ID = "test-auth-user";
+let requestKeySequence = 0;
+
+function requestKey(operation: string): string {
+  requestKeySequence += 1;
+  return `${operation}-${requestKeySequence}`;
+}
 
 // Sign-in is the ONE thing faked here (same as sales.test.ts): the
 // better-auth component has no in-memory equivalent, so it's stubbed with
@@ -158,7 +164,15 @@ async function seed(t: ReturnType<typeof convexTest>) {
         ts: now,
       });
     }
-    return { userId, customerId, channelId, teeM, teeL, shirtBlack, shirtWhite };
+    return {
+      userId,
+      customerId,
+      channelId,
+      teeM,
+      teeL,
+      shirtBlack,
+      shirtWhite,
+    };
   });
 }
 
@@ -167,20 +181,20 @@ const variantOf = (ids: SeedIds, key: VariantKey) => ids[key];
 /** Every ledger row for a variant, read the way the app reads it. */
 async function ledgerRows(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   return await t.run(async (ctx: MutationCtx) =>
     ctx.db
       .query("stockLedger")
       .withIndex("by_variant_ts", (q) => q.eq("variantId", variantId))
-      .collect()
+      .collect(),
   );
 }
 
 /** Stock the way the app computes it: the sum of the variant's ledger deltas. */
 async function stockOf(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   const rows = await ledgerRows(t, variantId);
   return rows.reduce((sum, row) => sum + row.delta, 0);
@@ -190,7 +204,7 @@ async function stockOf(
  * order, so the matrix shows the exact movement trail. */
 async function ledgerSummary(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ): Promise<string> {
   const rows = await ledgerRows(t, variantId);
   return rows
@@ -201,9 +215,9 @@ async function ledgerSummary(
 /** Today as the shop's day string (Asia/Phnom_Penh) — payments land on this
  * day, so the daily report must too (cash-basis rule #2). */
 function todayDay(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Phnom_Penh" }).format(
-    new Date()
-  );
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Phnom_Penh",
+  }).format(new Date());
 }
 
 /** A confirmed order through the real checkout — no shortcuts. */
@@ -211,9 +225,14 @@ async function checkout(
   t: ReturnType<typeof convexTest>,
   ids: SeedIds,
   lines: { variantId: Id<"productVariants">; qty: number }[],
-  extra: { deliveryFee?: number; discount?: number } = {}
+  extra: {
+    deliveryFee?: number;
+    discount?: number;
+    idempotencyKey?: string;
+  } = {},
 ) {
   return await t.mutation(api.sales.checkout, {
+    idempotencyKey: extra.idempotencyKey ?? requestKey("checkout"),
     customerId: ids.customerId,
     salesChannelId: ids.channelId,
     discount: extra.discount ?? 0,
@@ -233,9 +252,19 @@ async function edit(
   t: ReturnType<typeof convexTest>,
   saleId: Id<"sales">,
   items: EditItem[],
-  fields: { expectedVersion?: number; deliveryFee?: number } = {}
+  fields: {
+    expectedVersion?: number;
+    deliveryFee?: number;
+    idempotencyKey?: string;
+  } = {},
 ) {
-  return await t.mutation(api.sales.saveEdit, { saleId, items, ...fields });
+  const { idempotencyKey = requestKey("save-edit"), ...editFields } = fields;
+  return await t.mutation(api.sales.saveEdit, {
+    idempotencyKey,
+    saleId,
+    items,
+    ...editFields,
+  });
 }
 
 /** The Convex error code a mutation rejected with (undefined when it didn't). */
@@ -279,13 +308,13 @@ async function verifyMatrix(
   ids: SeedIds,
   title: string,
   opening: Partial<Record<VariantKey, number>>,
-  e: MatrixExpectation
+  e: MatrixExpectation,
 ): Promise<void> {
   console.log(`\n— ${title} —`);
   console.log(
     `opening stock: ${Object.entries(opening)
       .map(([k, v]) => `${k} ${v}`)
-      .join(", ")}`
+      .join(", ")}`,
   );
   console.log(`operation: ${e.operation}`);
   const matrix: [string, unknown, unknown][] = [];
@@ -321,18 +350,12 @@ async function verifyMatrix(
     // getDetail returns the history newest-first (the UI shows it that
     // way); the matrix asserts the chronological order the events really
     // happened in.
-    const actual = detail!.events
-      .map(({ event }) => event.type)
-      .reverse();
+    const actual = detail!.events.map(({ event }) => event.type).reverse();
     matrix.push(["sale events", e.events.join(", "), actual.join(", ")]);
   }
   if (e.snapshots) {
     const actual = detail!.items.map(({ item }) => item.unitCostSnapshot);
-    matrix.push([
-      "cost snapshots",
-      e.snapshots.join(", "),
-      actual.join(", "),
-    ]);
+    matrix.push(["cost snapshots", e.snapshots.join(", "), actual.join(", ")]);
   }
   if (e.version !== undefined) {
     const data = await t.query(api.sales.getEditData, { saleId: e.saleId });
@@ -359,8 +382,8 @@ async function verifyMatrix(
     const pass = expectedValue === actualValue;
     console.log(
       `${label}: expected ${String(expectedValue)} / actual ${String(
-        actualValue
-      )} — ${pass ? "PASS" : "FAIL"}`
+        actualValue,
+      )} — ${pass ? "PASS" : "FAIL"}`,
     );
   }
   for (const [label, expectedValue, actualValue] of matrix) {
@@ -371,7 +394,7 @@ async function verifyMatrix(
 /** Live opening stock for the four seeded variants (before the operation). */
 async function opening(
   t: ReturnType<typeof convexTest>,
-  ids: SeedIds
+  ids: SeedIds,
 ): Promise<Record<VariantKey, number>> {
   return {
     teeM: await stockOf(t, ids.teeM),
@@ -447,17 +470,29 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
     // The same item added twice stays two lines (checkout rule) — the edit
     // page does not merge them either; both lines deduct stock.
     expect(after.items).toHaveLength(2);
-    await verifyMatrix(t, ids, "3. add the same variant as a separate line", before, {
-      operation: "saveEdit adds teeM ×1 on its own second line",
-      saleId: sale.sale._id,
-      stock: { teeM: 7 },
-      ledger: { teeM: "purchase +10, sale -2, sale -1" },
-      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
-      events: ["created", "item_added"],
-      snapshots: [400, 400],
-      report: { moneyIn: 0, refunds: 0, cogs: 0, profit: 0, paymentsCount: 0 },
-      version: 1,
-    });
+    await verifyMatrix(
+      t,
+      ids,
+      "3. add the same variant as a separate line",
+      before,
+      {
+        operation: "saveEdit adds teeM ×1 on its own second line",
+        saleId: sale.sale._id,
+        stock: { teeM: 7 },
+        ledger: { teeM: "purchase +10, sale -2, sale -1" },
+        detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+        events: ["created", "item_added"],
+        snapshots: [400, 400],
+        report: {
+          moneyIn: 0,
+          refunds: 0,
+          cogs: 0,
+          profit: 0,
+          paymentsCount: 0,
+        },
+        version: 1,
+      },
+    );
   });
 
   test("4. increase quantity", async () => {
@@ -567,22 +602,34 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       },
     ]);
 
-    await verifyMatrix(t, ids, "7. change variant (size × color swap)", before, {
-      operation: "saveEdit swaps Black → White before delivery",
-      saleId: sale.sale._id,
-      stock: { shirtBlack: 10, shirtWhite: 8 },
-      ledger: {
-        shirtBlack: "purchase +10, sale -2, exchange_out +2",
-        shirtWhite: "purchase +10, exchange_in -2",
+    await verifyMatrix(
+      t,
+      ids,
+      "7. change variant (size × color swap)",
+      before,
+      {
+        operation: "saveEdit swaps Black → White before delivery",
+        saleId: sale.sale._id,
+        stock: { shirtBlack: 10, shirtWhite: 8 },
+        ledger: {
+          shirtBlack: "purchase +10, sale -2, exchange_out +2",
+          shirtWhite: "purchase +10, exchange_in -2",
+        },
+        // Re-costed to White's $6.00 average (batch cost), not the $5.00
+        // default and not Black's $5.00 snapshot: 2 × ($15 − $6) = 1800.
+        detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+        events: ["created", "item_swapped"],
+        snapshots: [600],
+        report: {
+          moneyIn: 0,
+          refunds: 0,
+          cogs: 0,
+          profit: 0,
+          paymentsCount: 0,
+        },
+        version: 1,
       },
-      // Re-costed to White's $6.00 average (batch cost), not the $5.00
-      // default and not Black's $5.00 snapshot: 2 × ($15 − $6) = 1800.
-      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
-      events: ["created", "item_swapped"],
-      snapshots: [600],
-      report: { moneyIn: 0, refunds: 0, cogs: 0, profit: 0, paymentsCount: 0 },
-      version: 1,
-    });
+    );
   });
 
   test("8. change several lines in one save", async () => {
@@ -637,7 +684,7 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 2 }],
-      { deliveryFee: 500 }
+      { deliveryFee: 500 },
     );
 
     await verifyMatrix(t, ids, "9. change only the delivery fee", before, {
@@ -664,25 +711,35 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
     const before = await opening(t, ids);
 
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [
-        { saleItemId: sale.items[0].item._id, qty: 2 },
-      ])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 2 }]),
     );
     expect(code).toBe("INVALID_QTY");
 
     // The rejected save changed nothing — delivered pieces are never
     // silently removed by a normal edit (that's the return flow's job).
-    await verifyMatrix(t, ids, "10. reduce below the delivered quantity", before, {
-      operation: "saveEdit lowers the line below qtyDelivered 3 — rejected",
-      saleId: sale.sale._id,
-      stock: { teeM: 7 },
-      ledger: { teeM: "purchase +10, sale -3" },
-      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
-      events: ["created", "lines_adjusted"],
-      snapshots: [400],
-      report: { moneyIn: 0, refunds: 0, cogs: 0, profit: 0, paymentsCount: 0 },
-      version: 0, // failed save does not bump the counter
-    });
+    await verifyMatrix(
+      t,
+      ids,
+      "10. reduce below the delivered quantity",
+      before,
+      {
+        operation: "saveEdit lowers the line below qtyDelivered 3 — rejected",
+        saleId: sale.sale._id,
+        stock: { teeM: 7 },
+        ledger: { teeM: "purchase +10, sale -3" },
+        detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+        events: ["created", "lines_adjusted"],
+        snapshots: [400],
+        report: {
+          moneyIn: 0,
+          refunds: 0,
+          cogs: 0,
+          profit: 0,
+          paymentsCount: 0,
+        },
+        version: 0, // failed save does not bump the counter
+      },
+    );
   });
 
   test("11. add more than available stock is rejected", async () => {
@@ -692,9 +749,7 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
     const before = await opening(t, ids);
 
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [
-        { saleItemId: sale.items[0].item._id, qty: 99 },
-      ])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 99 }]),
     );
     expect(code).toBe("OUT_OF_STOCK");
 
@@ -724,25 +779,37 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       edit(t, sale.sale._id, [
         { saleItemId: sale.items[0].item._id, qty: 5 },
         { saleItemId: other.items[0].item._id, qty: 2 },
-      ])
+      ]),
     );
     expect(code).toBe("NOT_FOUND");
 
-    await verifyMatrix(t, ids, "12. mid-save failure rolls the whole save back", before, {
-      operation:
-        "saveEdit: valid line + a line from another order — NOTHING saves",
-      saleId: sale.sale._id,
-      stock: { teeM: 8, teeL: 9 }, // no trace of the planned -3
-      ledger: {
-        teeM: "purchase +10, sale -2",
-        teeL: "purchase +10, sale -1",
+    await verifyMatrix(
+      t,
+      ids,
+      "12. mid-save failure rolls the whole save back",
+      before,
+      {
+        operation:
+          "saveEdit: valid line + a line from another order — NOTHING saves",
+        saleId: sale.sale._id,
+        stock: { teeM: 8, teeL: 9 }, // no trace of the planned -3
+        ledger: {
+          teeM: "purchase +10, sale -2",
+          teeL: "purchase +10, sale -1",
+        },
+        detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
+        events: ["created"],
+        snapshots: [400],
+        report: {
+          moneyIn: 0,
+          refunds: 0,
+          cogs: 0,
+          profit: 0,
+          paymentsCount: 0,
+        },
+        version: 0,
       },
-      detail: { total: 2000, paid: 0, remaining: 2000, profit: 1200 },
-      events: ["created"],
-      snapshots: [400],
-      report: { moneyIn: 0, refunds: 0, cogs: 0, profit: 0, paymentsCount: 0 },
-      version: 0,
-    });
+    );
   });
 
   test("13. retrying the same save is a clean no-op", async () => {
@@ -758,17 +825,30 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
     // The split row is invisible bookkeeping: the retry measures the line's
     // EFFECTIVE billed total (parent 2 + split 3 = 5) against the displayed
     // 5 → delta 0 → nothing changes and nothing duplicates.
-    await verifyMatrix(t, ids, "13. retrying the same save is a clean no-op", before, {
-      operation: "the identical saveEdit payload sent again (raise already split)",
-      saleId: sale.sale._id,
-      stock: { teeM: 5 },
-      ledger: { teeM: "purchase +10, sale -2, sale -3" }, // no duplicated rows
-      detail: { total: 5000, paid: 0, remaining: 5000, profit: 3000 },
-      events: ["created", "item_added"], // no duplicated events either
-      snapshots: [400, 400], // parent + the one split from the first save
-      report: { moneyIn: 0, refunds: 0, cogs: 0, profit: 0, paymentsCount: 0 },
-      version: 2, // every save bumps the counter, even a no-op one
-    });
+    await verifyMatrix(
+      t,
+      ids,
+      "13. retrying the same save is a clean no-op",
+      before,
+      {
+        operation:
+          "the identical saveEdit payload sent again (raise already split)",
+        saleId: sale.sale._id,
+        stock: { teeM: 5 },
+        ledger: { teeM: "purchase +10, sale -2, sale -3" }, // no duplicated rows
+        detail: { total: 5000, paid: 0, remaining: 5000, profit: 3000 },
+        events: ["created", "item_added"], // no duplicated events either
+        snapshots: [400, 400], // parent + the one split from the first save
+        report: {
+          moneyIn: 0,
+          refunds: 0,
+          cogs: 0,
+          profit: 0,
+          paymentsCount: 0,
+        },
+        version: 2, // every save bumps the counter, even a no-op one
+      },
+    );
   });
 
   test("14. two windows editing concurrently (stale-edit guard)", async () => {
@@ -782,17 +862,14 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 5 }],
-      { expectedVersion: 0 }
+      { expectedVersion: 0 },
     );
 
     // Window B still holds version 0 — its save must be refused.
     const code = await errorCodeOf(
-      edit(
-        t,
-        sale.sale._id,
-        [{ saleItemId: sale.items[0].item._id, qty: 6 }],
-        { expectedVersion: 0 }
-      )
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 6 }], {
+        expectedVersion: 0,
+      }),
     );
     expect(code).toBe("STALE_EDIT");
 
@@ -801,7 +878,7 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 6 }],
-      { expectedVersion: 1 }
+      { expectedVersion: 1 },
     );
 
     await verifyMatrix(t, ids, "14. two windows editing concurrently", before, {
@@ -833,20 +910,32 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
       status: "cancelled",
     });
 
-    await verifyMatrix(t, ids, "15. cancel after edit flows all stock back", before, {
-      operation: "the edited order is cancelled — every billed piece returns",
-      saleId: sale.sale._id,
-      stock: { teeM: 10, teeL: 10 },
-      ledger: {
-        teeM: "purchase +10, sale -2, cancel +2",
-        teeL: "purchase +10, sale -1, cancel +1",
+    await verifyMatrix(
+      t,
+      ids,
+      "15. cancel after edit flows all stock back",
+      before,
+      {
+        operation: "the edited order is cancelled — every billed piece returns",
+        saleId: sale.sale._id,
+        stock: { teeM: 10, teeL: 10 },
+        ledger: {
+          teeM: "purchase +10, sale -2, cancel +2",
+          teeL: "purchase +10, sale -1, cancel +1",
+        },
+        detail: { total: 0, paid: 0, remaining: 0, profit: 0 },
+        events: ["created", "item_added", "status_changed"],
+        snapshots: [400, 400],
+        report: {
+          moneyIn: 0,
+          refunds: 0,
+          cogs: 0,
+          profit: 0,
+          paymentsCount: 0,
+        },
+        version: 1, // the edit's counter stays — cancel doesn't rewrite history
       },
-      detail: { total: 0, paid: 0, remaining: 0, profit: 0 },
-      events: ["created", "item_added", "status_changed"],
-      snapshots: [400, 400],
-      report: { moneyIn: 0, refunds: 0, cogs: 0, profit: 0, paymentsCount: 0 },
-      version: 1, // the edit's counter stays — cancel doesn't rewrite history
-    });
+    );
   });
 
   test("16. return delivered pieces after edit", async () => {
@@ -875,48 +964,56 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
     // sequence flakes. A 2ms gap makes the order deterministic everywhere.
     await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
     });
     await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.refund, {
+      idempotencyKey: requestKey("payment-refund"),
       saleId: sale.sale._id,
       amount: 500,
     });
 
-    await verifyMatrix(t, ids, "16. return delivered pieces after edit", before, {
-      operation:
-        "return 1 delivered teeM + receive $20 + refund $5 — after the edit",
-      saleId: sale.sale._id,
-      stock: { teeM: 8, teeL: 9 }, // 10 − 3 + 1 returned; teeL − 1 from edit
-      ledger: {
-        teeM: "purchase +10, sale -3, return +1",
-        teeL: "purchase +10, sale -1",
+    await verifyMatrix(
+      t,
+      ids,
+      "16. return delivered pieces after edit",
+      before,
+      {
+        operation:
+          "return 1 delivered teeM + receive $20 + refund $5 — after the edit",
+        saleId: sale.sale._id,
+        stock: { teeM: 8, teeL: 9 }, // 10 − 3 + 1 returned; teeL − 1 from edit
+        ledger: {
+          teeM: "purchase +10, sale -3, return +1",
+          teeL: "purchase +10, sale -1",
+        },
+        // Billed: teeM 3 − 1 returned = 2 × $10 + teeL 1 × $10 = $30.
+        // Profit: (20 − 8) + (10 − 4) = 1800. Paid 2000 − 500 refund = 1500.
+        detail: { total: 3000, paid: 1500, remaining: 1500, profit: 1800 },
+        events: [
+          "created",
+          "lines_adjusted",
+          "item_added",
+          "items_returned",
+          "payment_received", // payments append their own audit events
+          "refund",
+        ],
+        snapshots: [400, 400],
+        // Cash basis: moneyIn 2000 − 500 refund = 1500; COGS pro-rata on
+        // $12 item cost: 2000/3000 → +800, −500/3000 → −200 ⇒ 600.
+        report: {
+          moneyIn: 1500,
+          refunds: 500,
+          cogs: 600,
+          profit: 900,
+          paymentsCount: 2,
+        },
+        version: 1,
       },
-      // Billed: teeM 3 − 1 returned = 2 × $10 + teeL 1 × $10 = $30.
-      // Profit: (20 − 8) + (10 − 4) = 1800. Paid 2000 − 500 refund = 1500.
-      detail: { total: 3000, paid: 1500, remaining: 1500, profit: 1800 },
-      events: [
-        "created",
-        "lines_adjusted",
-        "item_added",
-        "items_returned",
-        "payment_received", // payments append their own audit events
-        "refund",
-      ],
-      snapshots: [400, 400],
-      // Cash basis: moneyIn 2000 − 500 refund = 1500; COGS pro-rata on
-      // $12 item cost: 2000/3000 → +800, −500/3000 → −200 ⇒ 600.
-      report: {
-        moneyIn: 1500,
-        refunds: 500,
-        cogs: 600,
-        profit: 900,
-        paymentsCount: 2,
-      },
-      version: 1,
-    });
+    );
   });
 
   test("17. ledger, events, balance, snapshot, profit and reports stay consistent", async () => {
@@ -944,39 +1041,47 @@ describe("sale-edit consolidation regression (the 17 scenarios)", () => {
     // starting in the same millisecond could sort before them.
     await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
     });
     await new Promise((resolve) => setTimeout(resolve, 2));
     await t.mutation(api.payments.refund, {
+      idempotencyKey: requestKey("payment-refund"),
       saleId: sale.sale._id,
       amount: 500,
     });
 
-    await verifyMatrix(t, ids, "17. everything stays consistent end-to-end", before, {
-      operation: "checkout → swap Black→White → receive $20 → refund $5",
-      saleId: sale.sale._id,
-      stock: { shirtBlack: 10, shirtWhite: 8 },
-      ledger: {
-        shirtBlack: "purchase +10, sale -2, exchange_out +2",
-        shirtWhite: "purchase +10, exchange_in -2",
+    await verifyMatrix(
+      t,
+      ids,
+      "17. everything stays consistent end-to-end",
+      before,
+      {
+        operation: "checkout → swap Black→White → receive $20 → refund $5",
+        saleId: sale.sale._id,
+        stock: { shirtBlack: 10, shirtWhite: 8 },
+        ledger: {
+          shirtBlack: "purchase +10, sale -2, exchange_out +2",
+          shirtWhite: "purchase +10, exchange_in -2",
+        },
+        // Profit re-derived with White's $6 snapshot: 2 × (15 − 6) = 1800.
+        detail: { total: 3000, paid: 1500, remaining: 1500, profit: 1800 },
+        events: ["created", "item_swapped", "payment_received", "refund"],
+        snapshots: [600],
+        // The report's COGS follows the swapped snapshot: item cost 2 × $6
+        // = 1200; +2000/3000 → +800, −500/3000 → −200 ⇒ 600.
+        report: {
+          moneyIn: 1500,
+          refunds: 500,
+          cogs: 600,
+          profit: 900,
+          paymentsCount: 2,
+        },
+        version: 1,
       },
-      // Profit re-derived with White's $6 snapshot: 2 × (15 − 6) = 1800.
-      detail: { total: 3000, paid: 1500, remaining: 1500, profit: 1800 },
-      events: ["created", "item_swapped", "payment_received", "refund"],
-      snapshots: [600],
-      // The report's COGS follows the swapped snapshot: item cost 2 × $6
-      // = 1200; +2000/3000 → +800, −500/3000 → −200 ⇒ 600.
-      report: {
-        moneyIn: 1500,
-        refunds: 500,
-        cogs: 600,
-        profit: 900,
-        paymentsCount: 2,
-      },
-      version: 1,
-    });
+    );
   });
 });
 
@@ -1000,7 +1105,7 @@ async function deliver(
   t: ReturnType<typeof convexTest>,
   ids: SeedIds,
   lines: { variantId: Id<"productVariants">; qty: number }[],
-  extra: { deliveryFee?: number } = {}
+  extra: { deliveryFee?: number } = {},
 ) {
   const sale = await checkout(t, ids, lines, extra);
   await t.mutation(api.sales.setStatus, {
@@ -1020,6 +1125,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       // The returned piece's line falls to its post-resolution billed qty;
       // the replacement is a NEW line — exactly what the page sends.
@@ -1027,7 +1133,9 @@ describe("delivered-order edit (returns + new items, one save)", () => {
         { saleItemId: line._id, qty: 1 },
         { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
 
     expect(after.sale.status).toBe("delivered"); // handed now → stays delivered
@@ -1039,7 +1147,8 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     expect(newLine.item.qtyOrdered).toBe(1); // the new line is fully handed over
     expect(newLine.item.qtyDelivered).toBe(1);
     await verifyMatrix(t, ids, "1. return old size + add new size", before, {
-      operation: "delivered teeM ×2 → return 1 sellable + add teeL ×1 handed now",
+      operation:
+        "delivered teeM ×2 → return 1 sellable + add teeL ×1 handed now",
       saleId: sale.sale._id,
       stock: { teeM: 9, teeL: 9 }, // 10−2+1; 10−1
       ledger: {
@@ -1061,13 +1170,16 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: line._id, qty: 1 },
         { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
         { variantId: ids.shirtBlack, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
 
     await verifyMatrix(t, ids, "2. return + two extra shirts", before, {
@@ -1100,13 +1212,16 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: line._id, qty: 1 },
         { variantId: ids.teeM, qty: 1, fulfillment: "handed_now" },
         { variantId: ids.teeM, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
 
     expect(after.items).toHaveLength(3); // never merged
@@ -1135,9 +1250,12 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: line._id, qty: 1 }],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
 
     const rows = await ledgerRows(t, ids.teeM);
@@ -1155,9 +1273,12 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: line._id, qty: 1 }],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_damaged", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_damaged", qty: 1 },
+      ],
     });
 
     await verifyMatrix(t, ids, "5. damaged return", before, {
@@ -1180,6 +1301,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: line._id, qty: 2 }], // nothing changed
       resolutions: [
@@ -1211,6 +1333,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     // ships without it (Undo is client state; the server only ever sees what
     // the page sends).
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: line._id, qty: 2 }],
     });
@@ -1236,13 +1359,15 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     // without it is refused and writes nothing.
     const missing = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [{ variantId: ids.teeL, qty: 1 }],
-      })
+      }),
     );
     expect(missing).toBe("INVALID_INPUT");
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
     });
@@ -1262,6 +1387,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const before = await opening(t, ids);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ variantId: ids.teeL, qty: 1, fulfillment: "deliver_later" }],
     });
@@ -1293,6 +1419,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const before = await opening(t, ids);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
     });
@@ -1315,6 +1442,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
@@ -1334,12 +1462,15 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: line._id, qty: 1 },
         { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
 
     expect(after.total).toBe(2000); // $10 removed, $10 added — same bill
@@ -1353,12 +1484,15 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const line = sale.items[0].item;
 
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: line._id, qty: 1 },
         { variantId: ids.shirtBlack, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
 
     await verifyMatrix(t, ids, "13. more-expensive replacement", before, {
@@ -1382,18 +1516,22 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
     const line = sale.items[0].item;
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
     });
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: line._id, qty: 0 },
         { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 2 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 2 },
+      ],
     });
 
     // The bill drops below what was paid — but no refund row is written;
@@ -1406,7 +1544,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
       ctx.db
         .query("payments")
         .withIndex("by_sale", (q) => q.eq("saleId", sale.sale._id))
-        .collect()
+        .collect(),
     );
     expect(rows).toHaveLength(1); // only the original payment — no refund
     expect(rows.every((r) => r.amount > 0 && r.method !== "refund")).toBe(true);
@@ -1419,27 +1557,34 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const before = await opening(t, ids);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ variantId: ids.teeL, qty: 1, fulfillment: "deliver_later" }],
       deliveryFee: 300, // the extra trip bills the customer
     });
 
     expect(after.sale.deliveryFee).toBe(300);
-    await verifyMatrix(t, ids, "15. extra shipping for the second trip", before, {
-      operation: "deliver-later line + deliveryFee 0 → 300 in the SAME save",
-      saleId: sale.sale._id,
-      stock: { teeL: 9 },
-      ledger: { teeL: "purchase +10, sale -1" }, // the fee moves no stock
-      detail: { total: 3300, paid: 0, remaining: 3300, profit: 2100 },
-      events: [
-        "created",
-        "status_changed",
-        "item_added",
-        "sale_edited", // the fee edit, audited
-        "status_changed", // delivered → partially_delivered
-      ],
-      version: 1,
-    });
+    await verifyMatrix(
+      t,
+      ids,
+      "15. extra shipping for the second trip",
+      before,
+      {
+        operation: "deliver-later line + deliveryFee 0 → 300 in the SAME save",
+        saleId: sale.sale._id,
+        stock: { teeL: 9 },
+        ledger: { teeL: "purchase +10, sale -1" }, // the fee moves no stock
+        detail: { total: 3300, paid: 0, remaining: 3300, profit: 2100 },
+        events: [
+          "created",
+          "status_changed",
+          "item_added",
+          "sale_edited", // the fee edit, audited
+          "status_changed", // delivered → partially_delivered
+        ],
+        version: 1,
+      },
+    );
   });
 
   test("16. duplicate lines overselling together are rejected", async () => {
@@ -1452,12 +1597,13 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     // > 10) — the aggregate stock check must catch the pair.
     const code = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [
           { variantId: ids.teeL, qty: 6, fulfillment: "handed_now" },
           { variantId: ids.teeL, qty: 6, fulfillment: "handed_now" },
         ],
-      })
+      }),
     );
     expect(code).toBe("OUT_OF_STOCK");
 
@@ -1477,12 +1623,14 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const ids = await seed(t);
     const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
     });
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
     });
@@ -1501,12 +1649,22 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const payload = {
       saleId: sale.sale._id,
       expectedVersion: 0,
-      items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" as const }],
+      items: [
+        { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" as const },
+      ],
     };
-    await t.mutation(api.sales.saveEdit, payload);
+    await t.mutation(api.sales.saveEdit, {
+      ...payload,
+      idempotencyKey: requestKey("save-edit-window-a"),
+    });
     // The page's saving guard stops a second click; if it still fires, the
     // stale guard (version now 1) refuses the retry — nothing duplicates.
-    const code = await errorCodeOf(t.mutation(api.sales.saveEdit, payload));
+    const code = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        ...payload,
+        idempotencyKey: requestKey("save-edit-window-b"),
+      }),
+    );
     expect(code).toBe("STALE_EDIT");
 
     await verifyMatrix(t, ids, "18. double-click retry", before, {
@@ -1530,14 +1688,17 @@ describe("delivered-order edit (returns + new items, one save)", () => {
 
     const code = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         expectedVersion: 99, // another window saved since this page loaded
         items: [
           { saleItemId: line._id, qty: 1 },
           { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
         ],
-        resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
-      })
+        resolutions: [
+          { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+        ],
+      }),
     );
     expect(code).toBe("STALE_EDIT");
 
@@ -1567,18 +1728,22 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     // no return row, no qtyReturned patch, no new line, no version bump.
     const code = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [
           { saleItemId: line._id, qty: 1 },
           { variantId: ids.teeM, qty: 99, fulfillment: "handed_now" },
         ],
-        resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
-      })
+        resolutions: [
+          { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+        ],
+      }),
     );
     expect(code).toBe("OUT_OF_STOCK");
 
     await verifyMatrix(t, ids, "20. mid-save rollback", before, {
-      operation: "valid return resolution + overselling new line — NOTHING lands",
+      operation:
+        "valid return resolution + overselling new line — NOTHING lands",
       saleId: sale.sale._id,
       stock: { teeM: 8 },
       ledger: { teeM: "purchase +10, sale -2" },
@@ -1598,21 +1763,23 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     // (a) lower the billed qty without a resolution → the held-floor check.
     const below = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [{ saleItemId: line._id, qty: 1 }],
-      })
+      }),
     );
     expect(below).toBe("INVALID_QTY");
     // (b) raise the billed qty → LEGAL on a delivered order: the extra piece
     //     goes over with the visit, split into its own delivered internal
     //     line (the same current-price/current-cost derivation new lines get).
     const raised = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: line._id, qty: 3 }],
     });
     expect(raised.sale.status).toBe("delivered");
     const split = raised.items.find(
-      (it) => it.item.splitFromItemId === line._id
+      (it) => it.item.splitFromItemId === line._id,
     )!;
     expect(split.item.qtyOrdered).toBe(1); // exactly the delta
     expect(split.item.qtyDelivered).toBe(1); // handed over with the visit
@@ -1620,34 +1787,45 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     //     before the swap can even be considered.
     const swap = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [{ saleItemId: line._id, variantId: ids.teeL, qty: 2 }],
-      })
+      }),
     );
     expect(swap).toBe("INVALID_INPUT");
     // (d) fulfillment is only for NEW lines on a DELIVERED order — a new
     //     line with fulfillment on an undelivered order is refused.
-    const other = await checkout(t, ids, [{ variantId: ids.shirtBlack, qty: 1 }]);
+    const other = await checkout(t, ids, [
+      { variantId: ids.shirtBlack, qty: 1 },
+    ]);
     const elsewhere = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: other.sale._id,
         items: [{ variantId: ids.teeL, qty: 1, fulfillment: "handed_now" }],
-      })
+      }),
     );
     expect(elsewhere).toBe("INVALID_INPUT");
 
-    await verifyMatrix(t, ids, "21. delivered raise + refused structural edits", before, {
-      operation: "raise 2→3 (split, delivered); lower / swap / fulfillment-outside refused",
-      saleId: sale.sale._id,
-      stock: { teeM: 7, teeL: 10 },
-      ledger: {
-        teeM: "purchase +10, sale -2, sale -1",
-        teeL: "purchase +10",
+    await verifyMatrix(
+      t,
+      ids,
+      "21. delivered raise + refused structural edits",
+      before,
+      {
+        operation:
+          "raise 2→3 (split, delivered); lower / swap / fulfillment-outside refused",
+        saleId: sale.sale._id,
+        stock: { teeM: 7, teeL: 10 },
+        ledger: {
+          teeM: "purchase +10, sale -2, sale -1",
+          teeL: "purchase +10",
+        },
+        detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
+        events: ["created", "status_changed", "item_added"],
+        version: 1,
       },
-      detail: { total: 3000, paid: 0, remaining: 3000, profit: 1800 },
-      events: ["created", "status_changed", "item_added"],
-      version: 1,
-    });
+    );
   });
 
   test("21b. a returned-to-zero delivered line still cannot be swapped", async () => {
@@ -1658,12 +1836,15 @@ describe("delivered-order edit (returns + new items, one save)", () => {
 
     // First save: everything comes back, a replacement line goes out.
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: line._id, qty: 0 },
         { variantId: ids.teeL, qty: 1, fulfillment: "handed_now" },
       ],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 2 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 2 },
+      ],
     });
 
     // Second save: the old (now empty) line has no held pieces, so it would
@@ -1671,10 +1852,11 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     // silent re-labeling of a delivered order's history.
     const swap = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         expectedVersion: 1,
         items: [{ saleItemId: line._id, variantId: ids.shirtBlack, qty: 0 }],
-      })
+      }),
     );
     expect(swap).toBe("DELIVERED_LOCKED_LINES");
   });
@@ -1688,7 +1870,7 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     const path = await import("node:path");
     const componentsDir = path.resolve(
       path.dirname(new URL(import.meta.url).pathname),
-      "../src/components/features/sales"
+      "../src/components/features/sales",
     );
     for (const file of [
       "sale-edit-form.tsx",
@@ -1697,9 +1879,10 @@ describe("delivered-order edit (returns + new items, one save)", () => {
     ]) {
       const source = fs.readFileSync(path.join(componentsDir, file), "utf8");
       const found = /exchange|change size|add-on|add on/i.test(source);
-      expect(found, `${file} must not offer an Exchange / Change Size / Add-on workflow`).toBe(
-        false
-      );
+      expect(
+        found,
+        `${file} must not offer an Exchange / Change Size / Add-on workflow`,
+      ).toBe(false);
     }
   });
 });
@@ -1712,6 +1895,73 @@ describe("delivered-order edit (returns + new items, one save)", () => {
 // costed at the CURRENT server figures, so history never rewrites.
 // ---------------------------------------------------------------------------
 describe("raise-split mechanics — delta-based validation (the user spec)", () => {
+  test("delivered line 1 → 2 consumes only delta 1 and keeps fresh split values", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await deliver(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    const line = sale.items[0].item;
+
+    expect(await stockOf(t, ids.teeM)).toBe(9);
+    const beforeRows = await ledgerRows(t, ids.teeM);
+    expect(beforeRows.filter((row) => row.reason === "sale")).toHaveLength(1);
+
+    // A raise must use today's server values without rewriting the delivered
+    // parent's historical price or cost snapshot.
+    await t.run(async (ctx) => {
+      const variant = await ctx.db.get(ids.teeM);
+      expect(variant).not.toBeNull();
+      await ctx.db.patch(ids.teeM, { price: 1300 });
+
+      const purchaseRow = beforeRows.find((row) => row.reason === "purchase");
+      expect(purchaseRow?.purchaseItemId).toBeDefined();
+      await ctx.db.patch(purchaseRow!.purchaseItemId!, { unitCost: 700 });
+    });
+
+    const beforeEdit = await t.query(api.sales.getEditData, {
+      saleId: sale.sale._id,
+    });
+    expect(beforeEdit!.items[0].billedQty).toBe(1);
+    expect(beforeEdit!.items[0].stock).toBe(9);
+    expect(beforeEdit!.items[0].maxQty).toBe(10);
+
+    const after = await edit(t, sale.sale._id, [
+      { saleItemId: line._id, qty: 2 },
+    ]);
+
+    const parent = after.items.find(({ item }) => item._id === line._id)!.item;
+    const splits = after.items.filter(
+      ({ item }) => item.splitFromItemId === line._id,
+    );
+    expect(parent.qtyOrdered).toBe(1);
+    expect(parent.qtyDelivered).toBe(1);
+    expect(parent.unitPrice).toBe(1000);
+    expect(parent.unitCostSnapshot).toBe(400);
+    expect(splits).toHaveLength(1);
+    expect(splits[0].item.qtyOrdered).toBe(1);
+    expect(splits[0].item.qtyDelivered).toBe(1);
+    expect(splits[0].item.splitFromItemId).toBe(line._id);
+    expect(splits[0].item.unitPrice).toBe(1300);
+    expect(splits[0].item.unitCostSnapshot).toBe(700);
+
+    const editData = await t.query(api.sales.getEditData, {
+      saleId: sale.sale._id,
+    });
+    expect(editData!.items).toHaveLength(1);
+    expect(editData!.items[0].billedQty).toBe(2);
+    expect(editData!.items[0].item.qtyOrdered).toBe(2);
+    expect(editData!.items[0].item.qtyDelivered).toBe(2);
+
+    const afterRows = await ledgerRows(t, ids.teeM);
+    const beforeIds = new Set(beforeRows.map((row) => row._id));
+    const additionalRows = afterRows.filter((row) => !beforeIds.has(row._id));
+    expect(additionalRows).toHaveLength(1);
+    expect(additionalRows[0].reason).toBe("sale");
+    expect(additionalRows[0].delta).toBe(-1);
+    expect(additionalRows[0].saleItemId).toBe(splits[0].item._id);
+    expect(afterRows.filter((row) => row.reason === "sale")).toHaveLength(2);
+    expect(await stockOf(t, ids.teeM)).toBe(8);
+  });
+
   test("A. billed baselines: ordered 3, cancelled 1 → billed 2; ordered 3, returned 1 → billed 2", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
@@ -1726,7 +1976,9 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
     const returned = await checkout(t, ids, [{ variantId: ids.teeL, qty: 3 }]);
     await t.mutation(api.sales.setLineDelivered, {
       saleId: returned.sale._id,
-      adjustments: [{ saleItemId: returned.items[0].item._id, qtyDelivered: 3 }],
+      adjustments: [
+        { saleItemId: returned.items[0].item._id, qtyDelivered: 3 },
+      ],
     });
     await t.mutation(api.sales.returnItems, {
       saleId: returned.sale._id,
@@ -1773,7 +2025,9 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
     expect(split.unitPrice).toBe(1000);
     expect(split.unitCostSnapshot).toBe(400);
     // The edit page shows ONE line at the displayed quantity.
-    const data = await t.query(api.sales.getEditData, { saleId: sale.sale._id });
+    const data = await t.query(api.sales.getEditData, {
+      saleId: sale.sale._id,
+    });
     expect(data!.items).toHaveLength(1);
     expect(data!.items[0].billedQty).toBe(3);
     expect(data!.items[0].maxQty).toBe(3 + 7); // billed + shelf
@@ -1804,9 +2058,7 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
 
     // One more piece than the shelf holds → refused, nothing written.
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [
-        { saleItemId: sale.items[0].item._id, qty: 11 },
-      ])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 11 }]),
     );
     expect(code).toBe("OUT_OF_STOCK");
     const rows = await ledgerRows(t, ids.teeM);
@@ -1830,7 +2082,7 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
       edit(t, sale.sale._id, [
         { saleItemId: a.item._id, qty: 6 },
         { saleItemId: b.item._id, qty: 6 },
-      ])
+      ]),
     );
     expect(code).toBe("OUT_OF_STOCK");
 
@@ -1867,7 +2119,7 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
     // without ever moving stock. INVALID_QTY (the returned-line guard), not
     // the delivered lock: the guard holds on every status now.
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [{ saleItemId: line._id, qty: 2 }])
+      edit(t, sale.sale._id, [{ saleItemId: line._id, qty: 2 }]),
     );
     expect(code).toBe("INVALID_QTY");
   });
@@ -1883,15 +2135,18 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
       { saleItemId: line._id, qty: 3 },
     ]);
     const split = raised.items.find(
-      (it) => it.item.splitFromItemId === line._id
+      (it) => it.item.splitFromItemId === line._id,
     )!.item;
 
     // Resolution for 2 sent against the MERGED line: the parent's held 2
     // resolve first, the split keeps its piece.
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: line._id, qty: 1 }],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 2 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 2 },
+      ],
     });
     let parent = await t.run((ctx) => ctx.db.get(line._id));
     let splitRow = await t.run((ctx) => ctx.db.get(split._id));
@@ -1901,10 +2156,13 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
     // One more: the parent holds nothing now, the split gives its piece.
     // Version trail: the raise bumped 0→1, the first resolution save 1→2.
     await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       expectedVersion: 2,
       items: [{ saleItemId: line._id, qty: 0 }],
-      resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
+      resolutions: [
+        { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+      ],
     });
     parent = await t.run((ctx) => ctx.db.get(line._id));
     splitRow = await t.run((ctx) => ctx.db.get(split._id));
@@ -1914,11 +2172,14 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
     // Nothing is left with the customer — a further resolution is refused.
     const code = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         expectedVersion: 3,
         items: [{ saleItemId: line._id, qty: 0 }],
-        resolutions: [{ saleItemId: line._id, outcome: "returned_sellable", qty: 1 }],
-      })
+        resolutions: [
+          { saleItemId: line._id, outcome: "returned_sellable", qty: 1 },
+        ],
+      }),
     );
     expect(code).toBe("RETURN_EXCEEDS_HELD");
   });
@@ -1945,10 +2206,12 @@ describe("raise-split mechanics — delta-based validation (the user spec)", () 
     expect(splitRow!.qtyCancelled).toBe(2);
     expect(await stockOf(t, ids.teeM)).toBe(7); // 10 − 2 − 3 + 2
     expect(await ledgerSummary(t, ids.teeM)).toBe(
-      "purchase +10, sale -2, sale -3, cancel +2"
+      "purchase +10, sale -2, sale -3, cancel +2",
     );
     // The edit page still shows one line at the displayed 3.
-    const data = await t.query(api.sales.getEditData, { saleId: sale.sale._id });
+    const data = await t.query(api.sales.getEditData, {
+      saleId: sale.sale._id,
+    });
     expect(data!.items[0].billedQty).toBe(3);
   });
 });

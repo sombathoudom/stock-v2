@@ -4,6 +4,7 @@ import { Geist, Geist_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
 import { ConvexClientProvider } from "./ConvexClientProvider";
 import { Toaster } from "@/components/ui/sonner";
+import { ThemeProvider } from "@/components/theme-provider";
 import { getToken } from "@/lib/auth-server";
 import { cn, setServerLang } from "@/lib/utils";
 
@@ -33,9 +34,6 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   const lang = langCookie === "km" ? "km" : "en";
   setServerLang(lang);
   return (
-    // suppressHydrationWarning is required by next-themes — ThemeProvider
-    // adds the "dark" class on the client after reading localStorage, which
-    // would otherwise cause a hydration mismatch warning.
     <html
       lang={lang}
       suppressHydrationWarning
@@ -48,10 +46,12 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       )}
     >
       <body className="flex min-h-full flex-col">
-        <ConvexClientProvider initialToken={token} lang={lang}>
-          {children}
-          <Toaster position="top-center"/>
-        </ConvexClientProvider>
+        <ThemeProvider>
+          <ConvexClientProvider initialToken={token} lang={lang}>
+            {children}
+            <Toaster position="top-center" />
+          </ConvexClientProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

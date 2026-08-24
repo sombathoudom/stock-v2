@@ -13,13 +13,19 @@ import schema from "./schema";
 // delivery-correction) apply atomically with the edit, refunds stay clamped,
 // delivered cancellation is guided, retries are idempotent, failures roll
 // everything back, and the integrated path writes EXACTLY the same rows as
-// the standalone returnItems + payments.refund flow.
+// the standalone atomic returnItems return + refund flow.
 //
 // Same harness as the other suites: auth is stubbed, everything below
 // requireUser runs for real against an in-memory backend.
 
 const AUTH_USER_ID = "test-auth-user";
 const STAFF_AUTH_ID = "test-staff-user";
+let requestKeySequence = 0;
+
+function requestKey(operation: string): string {
+  requestKeySequence += 1;
+  return `${operation}-${requestKeySequence}`;
+}
 
 // The signed-in identity is swappable per test (role checks run for real).
 const mockAuth = { current: AUTH_USER_ID };
@@ -29,7 +35,10 @@ vi.mock("./auth", () => ({
     safeGetAuthUser: vi.fn(async () => ({
       _id: mockAuth.current,
       name: mockAuth.current === AUTH_USER_ID ? "Test Owner" : "Test Staff",
-      email: mockAuth.current === AUTH_USER_ID ? "owner@test.local" : "staff@test.local",
+      email:
+        mockAuth.current === AUTH_USER_ID
+          ? "owner@test.local"
+          : "staff@test.local",
     })),
   },
 }));
@@ -133,19 +142,19 @@ async function seed(t: ReturnType<typeof convexTest>) {
 
 async function ledgerRows(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   return await t.run(async (ctx: MutationCtx) =>
     ctx.db
       .query("stockLedger")
       .withIndex("by_variant_ts", (q) => q.eq("variantId", variantId))
-      .collect()
+      .collect(),
   );
 }
 
 async function stockOf(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   const rows = await ledgerRows(t, variantId);
   return rows.reduce((sum, row) => sum + row.delta, 0);
@@ -153,7 +162,7 @@ async function stockOf(
 
 async function ledgerSummary(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ): Promise<string> {
   const rows = await ledgerRows(t, variantId);
   return rows
@@ -175,9 +184,10 @@ async function checkout(
   t: ReturnType<typeof convexTest>,
   ids: SeedIds,
   lines: { variantId: Id<"productVariants">; qty: number }[],
-  extra: { deliveryFee?: number } = {}
+  extra: { deliveryFee?: number; idempotencyKey?: string } = {},
 ) {
   return await t.mutation(api.sales.checkout, {
+    idempotencyKey: extra.idempotencyKey ?? requestKey("checkout"),
     customerId: ids.customerId,
     salesChannelId: ids.channelId,
     discount: 0,
@@ -191,7 +201,7 @@ async function checkout(
 async function deliver(
   t: ReturnType<typeof convexTest>,
   saleId: Id<"sales">,
-  deliveredByLine: { saleItemId: Id<"saleItems">; qtyDelivered: number }[]
+  deliveredByLine: { saleItemId: Id<"saleItems">; qtyDelivered: number }[],
 ) {
   await t.mutation(api.sales.setLineDelivered, {
     saleId,
@@ -218,29 +228,45 @@ async function edit(
       reason?: string;
     }[];
     refund?: { amount: number; note?: string };
-  } = {}
+    idempotencyKey?: string;
+  } = {},
 ) {
-  return await t.mutation(api.sales.saveEdit, { saleId, items, ...extra });
+  const { idempotencyKey = requestKey("save-edit"), ...editFields } = extra;
+  return await t.mutation(api.sales.saveEdit, {
+    idempotencyKey,
+    saleId,
+    items,
+    ...editFields,
+  });
 }
 
 /** The order's payment rows (receive + refund live in one table). */
-async function paymentsOf(t: ReturnType<typeof convexTest>, saleId: Id<"sales">) {
+async function paymentsOf(
+  t: ReturnType<typeof convexTest>,
+  saleId: Id<"sales">,
+) {
   return await t.run(async (ctx: MutationCtx) =>
     ctx.db
       .query("payments")
       .withIndex("by_sale", (q) => q.eq("saleId", saleId))
-      .collect()
+      .collect(),
   );
 }
 
 /** Chronological event types for the order. */
-async function eventTypes(t: ReturnType<typeof convexTest>, saleId: Id<"sales">) {
+async function eventTypes(
+  t: ReturnType<typeof convexTest>,
+  saleId: Id<"sales">,
+) {
   const detail = await t.query(api.sales.getDetail, { saleId });
   return detail!.events.map(({ event }) => event.type).reverse();
 }
 
 /** The order's edit-version counter (getEditData). */
-async function versionOf(t: ReturnType<typeof convexTest>, saleId: Id<"sales">) {
+async function versionOf(
+  t: ReturnType<typeof convexTest>,
+  saleId: Id<"sales">,
+) {
   const data = await t.query(api.sales.getEditData, { saleId });
   return data!.version;
 }
@@ -251,11 +277,18 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
 
-    const result = await edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 0 }]);
+    const result = await edit(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qty: 0 },
+    ]);
 
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, cancel +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, cancel +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(10);
-    expect(await eventTypes(t, sale.sale._id)).toEqual(["created", "item_removed"]);
+    expect(await eventTypes(t, sale.sale._id)).toEqual([
+      "created",
+      "item_removed",
+    ]);
     expect(result!.total).toBe(0);
   });
 
@@ -263,7 +296,9 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
 
     const result = await edit(
       t,
@@ -271,14 +306,20 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
       {
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
         ],
-      }
+      },
     );
 
     // The return went through the shared engine: `return` row, qtyReturned
     // bumped, NO cancel row (the diff is a no-op after the resolution).
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(10);
     expect(result!.items[0].item.qtyReturned).toBe(1);
     expect(result!.items[0].item.qtyDelivered).toBe(1); // historical, preserved
@@ -295,7 +336,9 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 3 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 3 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 3 },
+    ]);
 
     const result = await edit(
       t,
@@ -303,12 +346,18 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       [{ saleItemId: sale.items[0].item._id, qty: 2 }],
       {
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
         ],
-      }
+      },
     );
 
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -3, return +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -3, return +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(8);
     const item = result!.items[0].item;
     expect(item.qtyOrdered).toBe(3); // ordered is never rewritten
@@ -326,7 +375,9 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
 
     const result = await edit(
       t,
@@ -334,21 +385,29 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
       {
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "returned_damaged", qty: 1 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_damaged",
+            qty: 1,
+          },
         ],
-      }
+      },
     );
 
     // return +1 then adjustment −1: the bill drops one piece, the shelf gets
     // nothing — but BOTH movements are recorded.
     expect(await ledgerSummary(t, ids.teeM)).toBe(
-      "purchase +10, sale -1, return +1, adjustment -1"
+      "purchase +10, sale -1, return +1, adjustment -1",
     );
     expect(await stockOf(t, ids.teeM)).toBe(9);
     expect(result!.items[0].item.qtyReturned).toBe(1);
     expect(result!.total).toBe(0);
-    const detail = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
-    const returned = detail!.events.find(({ event }) => event.type === "items_returned")!;
+    const detail = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
+    const returned = detail!.events.find(
+      ({ event }) => event.type === "items_returned",
+    )!;
     expect(returned.event.summary).toContain("damaged");
   });
 
@@ -356,7 +415,9 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 2 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 2 },
+    ]);
 
     const result = await edit(
       t,
@@ -364,9 +425,13 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       [{ saleItemId: sale.items[0].item._id, qty: 2 }],
       {
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "still_with_customer", qty: 2 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "still_with_customer",
+            qty: 2,
+          },
         ],
-      }
+      },
     );
 
     expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -2");
@@ -384,7 +449,9 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 2 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 2 },
+    ]);
     const lineId = sale.items[0].item._id;
     const resolution = {
       saleItemId: lineId,
@@ -393,24 +460,37 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       reason: "Door never opened — the door mark was wrong.",
     };
 
-    const result = await edit(t, sale.sale._id, [{ saleItemId: lineId, qty: 0 }], {
-      resolutions: [resolution],
-    });
+    const result = await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: lineId, qty: 0 }],
+      {
+        resolutions: [resolution],
+      },
+    );
 
     // The correction lowered delivered: the pieces flow back via cancel rows.
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -2, cancel +2");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -2, cancel +2",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(10);
     const item = result!.items[0].item;
     expect(item.qtyDelivered).toBe(0);
     expect(item.qtyCancelled).toBe(2);
-    const detail = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
-    const adjusted = detail!.events.find(({ event }) => event.type === "lines_adjusted")!;
+    const detail = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
+    const adjusted = detail!.events.find(
+      ({ event }) => event.type === "lines_adjusted",
+    )!;
     expect(adjusted.event.payload?.note).toContain("wrong");
 
     // Stock was restored exactly once — a second identical correction is
     // refused (nothing is held anymore).
     const second = await errorCodeOf(
-      edit(t, sale.sale._id, [{ saleItemId: lineId, qty: 0 }], { resolutions: [resolution] })
+      edit(t, sale.sale._id, [{ saleItemId: lineId, qty: 0 }], {
+        resolutions: [resolution],
+      }),
     );
     expect(second).toBe("RETURN_EXCEEDS_HELD");
 
@@ -422,9 +502,21 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     ]);
     mockAuth.current = STAFF_AUTH_ID;
     const asStaff = await errorCodeOf(
-      edit(t, sale2.sale._id, [{ saleItemId: sale2.items[0].item._id, qty: 0 }], {
-        resolutions: [{ saleItemId: sale2.items[0].item._id, outcome: "delivery_incorrect", qty: 2, reason: "x" }],
-      })
+      edit(
+        t,
+        sale2.sale._id,
+        [{ saleItemId: sale2.items[0].item._id, qty: 0 }],
+        {
+          resolutions: [
+            {
+              saleItemId: sale2.items[0].item._id,
+              outcome: "delivery_incorrect",
+              qty: 2,
+              reason: "x",
+            },
+          ],
+        },
+      ),
     );
     expect(asStaff).toBe("FORBIDDEN");
     mockAuth.current = AUTH_USER_ID;
@@ -442,6 +534,7 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       { saleItemId: sale.items[1].item._id, qtyDelivered: 1 },
     ]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 2000,
       method: "cash",
@@ -451,8 +544,16 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       saleId: sale.sale._id,
       status: "cancelled",
       resolutions: [
-        { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
-        { saleItemId: sale.items[1].item._id, outcome: "returned_sellable", qty: 1 },
+        {
+          saleItemId: sale.items[0].item._id,
+          outcome: "returned_sellable",
+          qty: 1,
+        },
+        {
+          saleItemId: sale.items[1].item._id,
+          outcome: "returned_sellable",
+          qty: 1,
+        },
       ],
       refund: { amount: 2000 },
     });
@@ -480,21 +581,29 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 2 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 2 },
+    ]);
 
     const code = await errorCodeOf(
       t.mutation(api.sales.setStatus, {
         saleId: sale.sale._id,
         status: "cancelled",
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
         ],
-      })
+      }),
     );
     expect(code).toBe("CANNOT_CANCEL_HELD");
 
     // Everything rolled back: the resolution never applied, status unchanged.
-    const detail = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
+    const detail = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
     expect(detail!.sale.status).toBe("delivered");
     expect(detail!.items[0].item.qtyReturned).toBe(0);
     expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -2");
@@ -505,8 +614,11 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 1000,
       method: "cash",
@@ -518,13 +630,19 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
       {
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
         ],
         refund: { amount: 1000 },
-      }
+      },
     );
 
-    expect((await paymentsOf(t, sale.sale._id)).map((p) => p.amount)).toEqual([1000, -1000]);
+    expect((await paymentsOf(t, sale.sale._id)).map((p) => p.amount)).toEqual([
+      1000, -1000,
+    ]);
     expect(result!.paid).toBe(0);
     expect(result!.total).toBe(0);
     expect(await eventTypes(t, sale.sale._id)).toEqual([
@@ -541,13 +659,24 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
 
-    await edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 0 }], {
-      resolutions: [
-        { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
-      ],
-    });
+    await edit(
+      t,
+      sale.sale._id,
+      [{ saleItemId: sale.items[0].item._id, qty: 0 }],
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
+    );
 
     expect(await paymentsOf(t, sale.sale._id)).toHaveLength(0);
     expect(await eventTypes(t, sale.sale._id)).toEqual([
@@ -562,8 +691,11 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 1000,
       method: "cash",
@@ -572,18 +704,26 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const code = await errorCodeOf(
       edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 0 }], {
         resolutions: [
-          { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
         ],
         refund: { amount: 1001 },
-      })
+      }),
     );
     expect(code).toBe("INVALID_PAYMENT");
 
     // The whole save rolled back — resolution included.
-    const detail = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
+    const detail = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
     expect(detail!.items[0].item.qtyReturned).toBe(0);
     expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1");
-    expect((await paymentsOf(t, sale.sale._id)).map((p) => p.amount)).toEqual([1000]);
+    expect((await paymentsOf(t, sale.sale._id)).map((p) => p.amount)).toEqual([
+      1000,
+    ]);
     expect(await versionOf(t, sale.sale._id)).toBe(0);
   });
 
@@ -593,13 +733,19 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }], {
       deliveryFee: 500,
     });
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
 
     const result = await t.mutation(api.sales.setStatus, {
       saleId: sale.sale._id,
       status: "cancelled",
       resolutions: [
-        { saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 },
+        {
+          saleItemId: sale.items[0].item._id,
+          outcome: "returned_sellable",
+          qty: 1,
+        },
       ],
       chargeDeliveryFee: true,
     });
@@ -616,8 +762,11 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: sale.sale._id,
       amount: 1000,
       method: "cash",
@@ -636,12 +785,24 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
       refund: { amount: 1000 },
     };
 
-    await t.mutation(api.sales.saveEdit, payload);
-    const second = await errorCodeOf(t.mutation(api.sales.saveEdit, payload));
+    await t.mutation(api.sales.saveEdit, {
+      ...payload,
+      idempotencyKey: requestKey("save-edit-window-a"),
+    });
+    const second = await errorCodeOf(
+      t.mutation(api.sales.saveEdit, {
+        ...payload,
+        idempotencyKey: requestKey("save-edit-window-b"),
+      }),
+    );
     expect(second).toBe("STALE_EDIT");
 
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
-    expect((await paymentsOf(t, sale.sale._id)).map((p) => p.amount)).toEqual([1000, -1000]);
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1",
+    );
+    expect((await paymentsOf(t, sale.sale._id)).map((p) => p.amount)).toEqual([
+      1000, -1000,
+    ]);
     expect(await eventTypes(t, sale.sale._id)).toEqual([
       "created",
       "lines_adjusted",
@@ -656,7 +817,9 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     const lineId = sale.items[0].item._id;
 
     // The resolutions apply first (writes!), then the diff breaks the
@@ -664,17 +827,22 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     // back with the failed edit.
     const code = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [{ saleItemId: lineId, qty: 3 }],
-        resolutions: [{ saleItemId: lineId, outcome: "returned_sellable", qty: 1 }],
+        resolutions: [
+          { saleItemId: lineId, outcome: "returned_sellable", qty: 1 },
+        ],
         refund: { amount: 1000 },
-      })
+      }),
     );
     // The refund is checked right after the resolutions (before the diff),
     // and nothing was paid yet — the whole save must roll back either way.
     expect(code).toBe("INVALID_PAYMENT");
 
-    const detail = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
+    const detail = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
     expect(detail!.items[0].item.qtyReturned).toBe(0);
     expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1");
     expect(await paymentsOf(t, sale.sale._id)).toHaveLength(0);
@@ -687,23 +855,38 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
 
     // Sale A: the Edit Sale page (saveEdit with resolutions + refund).
     const saleA = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, saleA.sale._id, [{ saleItemId: saleA.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, saleA.sale._id, [
+      { saleItemId: saleA.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: saleA.sale._id,
       amount: 1000,
       method: "cash",
     });
-    await edit(t, saleA.sale._id, [{ saleItemId: saleA.items[0].item._id, qty: 0 }], {
-      resolutions: [
-        { saleItemId: saleA.items[0].item._id, outcome: "returned_sellable", qty: 1 },
-      ],
-      refund: { amount: 1000 },
-    });
+    await edit(
+      t,
+      saleA.sale._id,
+      [{ saleItemId: saleA.items[0].item._id, qty: 0 }],
+      {
+        resolutions: [
+          {
+            saleItemId: saleA.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+        refund: { amount: 1000 },
+      },
+    );
 
-    // Sale B: the standalone flow (returnItems + payments.refund).
+    // Sale B: the standalone atomic returnItems flow.
     const saleB = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, saleB.sale._id, [{ saleItemId: saleB.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, saleB.sale._id, [
+      { saleItemId: saleB.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
       saleId: saleB.sale._id,
       amount: 1000,
       method: "cash",
@@ -711,29 +894,126 @@ describe("integrated returns & corrections (saveEdit / setStatus resolutions)", 
     await t.mutation(api.sales.returnItems, {
       saleId: saleB.sale._id,
       returns: [{ saleItemId: saleB.items[0].item._id, qty: 1 }],
+      refund: { amount: 1000 },
     });
-    await t.mutation(api.payments.refund, { saleId: saleB.sale._id, amount: 1000 });
 
     // Identical stock, ledger, payments, events, and money — the integrated
     // path reuses the exact same engine (version counters excluded).
     expect(await stockOf(t, ids.teeM)).toBe(10);
     expect(await ledgerSummary(t, ids.teeM)).toBe(
-      "purchase +10, sale -1, return +1, sale -1, return +1"
+      "purchase +10, sale -1, return +1, sale -1, return +1",
     );
-    expect((await paymentsOf(t, saleA.sale._id)).map((p) => p.amount)).toEqual([1000, -1000]);
-    expect((await paymentsOf(t, saleB.sale._id)).map((p) => p.amount)).toEqual([1000, -1000]);
-    expect(await eventTypes(t, saleA.sale._id)).toEqual(await eventTypes(t, saleB.sale._id));
-    const detailA = await t.query(api.sales.getDetail, { saleId: saleA.sale._id });
-    const detailB = await t.query(api.sales.getDetail, { saleId: saleB.sale._id });
+    expect((await paymentsOf(t, saleA.sale._id)).map((p) => p.amount)).toEqual([
+      1000, -1000,
+    ]);
+    expect((await paymentsOf(t, saleB.sale._id)).map((p) => p.amount)).toEqual([
+      1000, -1000,
+    ]);
+    expect(await eventTypes(t, saleA.sale._id)).toEqual(
+      await eventTypes(t, saleB.sale._id),
+    );
+    const detailA = await t.query(api.sales.getDetail, {
+      saleId: saleA.sale._id,
+    });
+    const detailB = await t.query(api.sales.getDetail, {
+      saleId: saleB.sale._id,
+    });
     expect(detailA!.total).toBe(detailB!.total);
     expect(detailA!.paid).toBe(detailB!.paid);
     expect(detailA!.remaining).toBe(detailB!.remaining);
   });
 });
 
+describe("standalone atomic return + refund", () => {
+  test("return and refund commit together with exact stock and balance", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    const saleItemId = sale.items[0].item._id;
+    await deliver(t, sale.sale._id, [{ saleItemId, qtyDelivered: 1 }]);
+    await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
+      saleId: sale.sale._id,
+      amount: 1000,
+      method: "cash",
+    });
+
+    const result = await t.mutation(api.sales.returnItems, {
+      saleId: sale.sale._id,
+      returns: [{ saleItemId, qty: 1 }],
+      refund: { amount: 1000, note: "Returned at shop" },
+    });
+
+    const returnRows = (await ledgerRows(t, ids.teeM)).filter(
+      (row) => row.reason === "return",
+    );
+    expect(returnRows).toHaveLength(1);
+    expect(returnRows[0]).toMatchObject({
+      variantId: ids.teeM,
+      saleItemId,
+      delta: 1,
+      reason: "return",
+      userId: ids.userId,
+    });
+    expect(result.items[0].item.qtyReturned).toBe(1);
+    expect(
+      (await paymentsOf(t, sale.sale._id)).map((payment) => payment.amount),
+    ).toEqual([1000, -1000]);
+    expect(result.total).toBe(0);
+    expect(result.paid).toBe(0);
+    expect(result.remaining).toBe(0);
+    expect(await eventTypes(t, sale.sale._id)).toEqual([
+      "created",
+      "lines_adjusted",
+      "status_changed",
+      "payment_received",
+      "items_returned",
+      "refund",
+    ]);
+  });
+
+  test("excessive refund rolls back an otherwise valid return", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
+    const saleItemId = sale.items[0].item._id;
+    await deliver(t, sale.sale._id, [{ saleItemId, qtyDelivered: 1 }]);
+    await t.mutation(api.payments.receive, {
+      idempotencyKey: requestKey("payment-receive"),
+      saleId: sale.sale._id,
+      amount: 1000,
+      method: "cash",
+    });
+    const eventsBefore = await eventTypes(t, sale.sale._id);
+
+    const code = await errorCodeOf(
+      t.mutation(api.sales.returnItems, {
+        saleId: sale.sale._id,
+        returns: [{ saleItemId, qty: 1 }],
+        refund: { amount: 1001 },
+      }),
+    );
+
+    expect(code).toBe("INVALID_PAYMENT");
+    const detail = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
+    expect(detail!.items[0].item.qtyReturned).toBe(0);
+    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1");
+    expect(await stockOf(t, ids.teeM)).toBe(9);
+    expect(
+      (await paymentsOf(t, sale.sale._id)).map((payment) => payment.amount),
+    ).toEqual([1000]);
+    expect(await eventTypes(t, sale.sale._id)).toEqual(eventsBefore);
+  });
+});
+
 describe("persisted returns on the Edit Sale page (regression: undo reactivation + stock projection)", () => {
   /** Everything the edit page sees for the order's lines. */
-  async function editDataOf(t: ReturnType<typeof convexTest>, saleId: Id<"sales">) {
+  async function editDataOf(
+    t: ReturnType<typeof convexTest>,
+    saleId: Id<"sales">,
+  ) {
     const data = await t.query(api.sales.getEditData, { saleId });
     expect(data).not.toBeNull();
     return data!;
@@ -743,12 +1023,22 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
 
     // The line opens as history: bills nothing, the ledger says it came back,
@@ -767,12 +1057,22 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
     const version = await versionOf(t, sale.sale._id);
     const eventsBefore = await eventTypes(t, sale.sale._id);
@@ -781,11 +1081,13 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { expectedVersion: version }
+      { expectedVersion: version },
     );
 
     // Nothing moved: same ledger rows, same stock, same events, same line.
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(10);
     expect(await eventTypes(t, sale.sale._id)).toEqual(eventsBefore);
     expect(result!.items[0].item.qtyReturned).toBe(1);
@@ -796,12 +1098,22 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
 
     // A stale/tampered client re-sends the returned line as an active line.
@@ -809,11 +1121,13 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     // and holds on EVERY status now — raises are legal on delivered orders,
     // but a returned line stays read-only wherever it is.
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }]),
     );
     expect(code).toBe("INVALID_QTY");
     // The refusal wrote nothing.
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(10);
   });
 
@@ -821,23 +1135,38 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
     // The only way a delivered order re-opens: the mark was a mistake.
-    await t.mutation(api.sales.setStatus, { saleId: sale.sale._id, status: "partially_delivered" });
+    await t.mutation(api.sales.setStatus, {
+      saleId: sale.sale._id,
+      status: "partially_delivered",
+    });
 
     // On the now-unlocked order the returned line must still refuse to come
     // back — the guard lives on the RETURNED state, not the delivered lock.
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 1 }]),
     );
     expect(code).toBe("INVALID_QTY");
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(10);
   });
 
@@ -845,23 +1174,38 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 2 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 2 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 2 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 1 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
     expect(await stockOf(t, ids.teeM)).toBe(9); // 10 − 2 + 1
-    await t.mutation(api.sales.setStatus, { saleId: sale.sale._id, status: "partially_delivered" });
+    await t.mutation(api.sales.setStatus, {
+      saleId: sale.sale._id,
+      status: "partially_delivered",
+    });
 
     // One piece returned → billedOld is 1 → raising back to 2 is a second
     // billing of the returned piece (the ledger return row is immutable).
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 2 }])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 2 }]),
     );
     expect(code).toBe("INVALID_QTY");
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -2, return +1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -2, return +1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(9);
   });
 
@@ -869,16 +1213,27 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
     const version = await versionOf(t, sale.sale._id);
 
     const result = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       expectedVersion: version,
       items: [
@@ -889,12 +1244,18 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
 
     // The new line deducts current stock EXACTLY once (the returned piece is
     // already back on the shelf, so stock goes 10 → 9 — never 8).
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1, sale -1");
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1, sale -1",
+    );
     expect(await stockOf(t, ids.teeM)).toBe(9);
     // A NEW saleItem identity — never a merge with the historical line.
     expect(result!.items).toHaveLength(2);
-    const original = result!.items.find((i) => i.item._id === sale.items[0].item._id)!;
-    const added = result!.items.find((i) => i.item._id !== sale.items[0].item._id)!;
+    const original = result!.items.find(
+      (i) => i.item._id === sale.items[0].item._id,
+    )!;
+    const added = result!.items.find(
+      (i) => i.item._id !== sale.items[0].item._id,
+    )!;
     expect(original.item.qtyReturned).toBe(1); // history preserved, untouched
     expect(original.item.qtyDelivered).toBe(1);
     expect(original.item.qtyOrdered).toBe(1);
@@ -906,7 +1267,13 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     // this test pins what matters: every event exists exactly once, including
     // the historical items_returned (nothing was rewritten) and item_added.
     expect((await eventTypes(t, sale.sale._id)).sort()).toEqual(
-      ["created", "lines_adjusted", "status_changed", "items_returned", "item_added"].sort()
+      [
+        "created",
+        "lines_adjusted",
+        "status_changed",
+        "items_returned",
+        "item_added",
+      ].sort(),
     );
   });
 
@@ -914,7 +1281,9 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     const version = await versionOf(t, sale.sale._id);
 
     await edit(
@@ -923,23 +1292,39 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
       {
         expectedVersion: version,
-        resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }],
-      }
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
 
     // The same save retried with the OLD version — the order moved on.
     const code = await errorCodeOf(
       edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 0 }], {
         expectedVersion: version,
-        resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }],
-      })
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      }),
     );
     expect(code).toBe("STALE_EDIT");
     // The retry wrote nothing: still exactly one return row, one item_returned.
-    expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -1, return +1");
-    expect((await eventTypes(t, sale.sale._id)).filter((e) => e === "items_returned")).toEqual([
-      "items_returned",
-    ]);
+    expect(await ledgerSummary(t, ids.teeM)).toBe(
+      "purchase +10, sale -1, return +1",
+    );
+    expect(
+      (await eventTypes(t, sale.sale._id)).filter(
+        (e) => e === "items_returned",
+      ),
+    ).toEqual(["items_returned"]);
     expect(await stockOf(t, ids.teeM)).toBe(10);
   });
 
@@ -947,12 +1332,22 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 3 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 3 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 3 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 2 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_sellable", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_sellable",
+            qty: 1,
+          },
+        ],
+      },
     );
 
     const data = await editDataOf(t, sale.sale._id);
@@ -967,12 +1362,22 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const sale = await checkout(t, ids, [{ variantId: ids.teeM, qty: 1 }]);
-    await deliver(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qtyDelivered: 1 }]);
+    await deliver(t, sale.sale._id, [
+      { saleItemId: sale.items[0].item._id, qtyDelivered: 1 },
+    ]);
     await edit(
       t,
       sale.sale._id,
       [{ saleItemId: sale.items[0].item._id, qty: 0 }],
-      { resolutions: [{ saleItemId: sale.items[0].item._id, outcome: "returned_damaged", qty: 1 }] }
+      {
+        resolutions: [
+          {
+            saleItemId: sale.items[0].item._id,
+            outcome: "returned_damaged",
+            qty: 1,
+          },
+        ],
+      },
     );
 
     const data = await editDataOf(t, sale.sale._id);
@@ -989,7 +1394,7 @@ describe("persisted returns on the Edit Sale page (regression: undo reactivation
     // 2 on the shelf (10 − 8); asking for 5 more must fail — even though no
     // single line's input cap catches it, the variant-level check does.
     const code = await errorCodeOf(
-      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 13 }])
+      edit(t, sale.sale._id, [{ saleItemId: sale.items[0].item._id, qty: 13 }]),
     );
     expect(code).toBe("OUT_OF_STOCK");
     expect(await ledgerSummary(t, ids.teeM)).toBe("purchase +10, sale -8");

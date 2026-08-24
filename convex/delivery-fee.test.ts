@@ -13,6 +13,12 @@ import schema from "./schema";
 // fee-less order with the module off is still rejected.
 
 const AUTH_USER_ID = "test-auth-user";
+let requestKeySequence = 0;
+
+function requestKey(operation: string): string {
+  requestKeySequence += 1;
+  return `${operation}-${requestKeySequence}`;
+}
 vi.mock("./auth", () => ({
   authComponent: {
     safeGetAuthUser: vi.fn(async () => ({
@@ -107,7 +113,6 @@ async function seed(t: ReturnType<typeof convexTest>) {
   });
 }
 
-
 async function errorCodeOf(p: Promise<unknown>): Promise<string | undefined> {
   try {
     await p;
@@ -124,6 +129,7 @@ describe("shipping fee survival", () => {
 
     // Self-delivery: fee stands on its own, no company.
     const detail = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
       customerId: ids.customerId,
       salesChannelId: ids.channelId,
       discount: 0,
@@ -136,6 +142,7 @@ describe("shipping fee survival", () => {
     // Edit WITHOUT touching delivery fields (the form sends nothing when
     // delivery is off, or the same values when on).
     const edited = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: detail.sale._id,
       items: [{ saleItemId: detail.items[0].item._id, qty: 1 }],
     });
@@ -149,6 +156,7 @@ describe("shipping fee survival", () => {
 
     // POS sends company but NO fee → company default 300 lands.
     const detail = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
       customerId: ids.customerId,
       salesChannelId: ids.channelId,
       deliveryCompanyId: ids.companyId,
@@ -161,6 +169,7 @@ describe("shipping fee survival", () => {
     // The EDIT page's exact payload: it ALWAYS sends the fee field when the
     // module is on (seeded from the sale). Same values → nothing changes.
     const edited = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: detail.sale._id,
       items: [{ saleItemId: detail.items[0].item._id, qty: 1 }],
       customerId: ids.customerId,
@@ -179,6 +188,7 @@ describe("shipping fee survival", () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     const detail = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
       customerId: ids.customerId,
       salesChannelId: ids.channelId,
       discount: 0,
@@ -188,6 +198,7 @@ describe("shipping fee survival", () => {
 
     // The form sends `deliveryCompanyId: (values.companyId || null)` — "" → null.
     const edited = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: detail.sale._id,
       items: [{ saleItemId: detail.items[0].item._id, qty: 1 }],
       customerId: ids.customerId,
@@ -209,6 +220,7 @@ describe("shipping fee survival", () => {
     // Create the fee-bearing order while the module is ON, then turn the
     // module off — the order keeps its fee (nothing is ever rewritten).
     const detail = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
       customerId: ids.customerId,
       salesChannelId: ids.channelId,
       discount: 0,
@@ -223,6 +235,7 @@ describe("shipping fee survival", () => {
 
     // The edit page sends the delivery fields (order carries a fee) — kept.
     const edited = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: detail.sale._id,
       items: [{ saleItemId: detail.items[0].item._id, qty: 1 }],
       customerId: ids.customerId,
@@ -238,6 +251,7 @@ describe("shipping fee survival", () => {
 
     // A fee on a fee-less order while the module is off is still rejected.
     const feeLess = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
       customerId: ids.customerId,
       salesChannelId: ids.channelId,
       discount: 0,
@@ -245,10 +259,11 @@ describe("shipping fee survival", () => {
     });
     const rejected = await errorCodeOf(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: feeLess.sale._id,
         items: [{ saleItemId: feeLess.items[0].item._id, qty: 1 }],
         deliveryFee: 500,
-      })
+      }),
     );
     expect(rejected).toBe("INVALID_INPUT");
   });

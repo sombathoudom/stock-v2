@@ -29,36 +29,35 @@ export type CartLine = {
  *  carts were deduped by variant, so the fallback stays unique too. */
 export const cartLineId = (line: CartLine) => line.key ?? line.variantId;
 
+/** Append one add as its own line when the variant's aggregate quantity fits
+ * the stock snapshot. The caller supplies the key so this projection stays
+ * deterministic and easy to test. */
+export function addCartLine(
+  current: CartLine[],
+  line: Omit<CartLine, "key">,
+  key: string
+): CartLine[] {
+  const stock = line.stock ?? Number.POSITIVE_INFINITY;
+  const variantQty = current.reduce(
+    (total, item) =>
+      item.variantId === line.variantId ? total + item.qty : total,
+    0
+  );
+
+  if (line.qty < 1 || variantQty + line.qty > stock) return current;
+  return [...current, { ...line, key }];
+}
+
 export function useCheckoutCart() {
   const [cart, setCart] = usePersistentState<CartLine[]>("pos:cart", []);
 
-  /** Add one variant (fast POS tap-to-add, qty 1). A repeated tap on the same
-   *  card bumps the EXISTING line's qty — clamped to the stock snapshot — so
-   *  five taps give one line ×5, not five lines. A line that already carries
-   *  a custom discount is left untouched and the tap opens a fresh line, so
-   *  the T10 per-item discount stays intact per line. Legacy persisted lines
-   *  have no stock snapshot — their + stays unclamped (server still checks). */
+  /** Add one variant (fast POS tap-to-add, qty 1). Every accepted tap creates
+   *  a separate line, while all lines for the variant share one stock cap.
+   *  Legacy persisted lines without a snapshot remain unclamped; checkout
+   *  still re-checks real ledger stock server-side. */
   const addVariant = useCallback(
     (line: Omit<CartLine, "key">) => {
-      setCart((current) => {
-        const stock = line.stock ?? Number.POSITIVE_INFINITY;
-        const existing = current.find(
-          (c) => c.variantId === line.variantId && !c.discount
-        );
-        if (existing) {
-          // Already at the stock cap — no-op, never a second line for the
-          // same variant (the cart's + stepper is the qty control).
-          if (existing.qty >= stock) return current;
-          return current.map((c) =>
-            (c.key ?? c.variantId) === (existing.key ?? existing.variantId)
-              ? { ...c, qty: c.qty + 1 }
-              : c
-          );
-        }
-        // Out of stock — no-op.
-        if (stock < 1) return current;
-        return [...current, { ...line, key: crypto.randomUUID() }];
-      });
+      setCart((current) => addCartLine(current, line, crypto.randomUUID()));
     },
     [setCart]
   );

@@ -1,7 +1,7 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import { query } from "./_generated/server";
 import { getShop, requireUser, startOfDay } from "./helpers";
@@ -21,12 +21,13 @@ import {
 // and spends are the period's expense rows. Both ride indexed day-string
 // range queries (receivedDay / spentDay) — reports never scan.
 //
-// COGS recognition for partial payments: each payment row of amount A against
-// an order with total T and cost C recognizes round(A/T × C) of cost. A fully
-// paid order recognizes exactly its full cost across the payment days; a
-// refund recognizes negative cost. Delivery income / delivery cost are the
-// same proportion of the delivery fee and the company cost — shown as their
-// own lines (rule #7), while the actual company payout lands in expenses.
+// COGS recognition for partial payments: each payment gets the difference
+// between the rounded allocation at cumulative paid before and after that
+// row. This preserves proportional cash-basis recognition while guaranteeing
+// that a fully paid order recognizes its exact cost across payment days and a
+// refund reverses the corresponding allocation. Delivery income / delivery
+// cost use the same allocation policy for the fee and company cost — shown as
+// their own lines (rule #7), while the actual payout lands in expenses.
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -85,6 +86,63 @@ async function orderCosts(
   };
 }
 
+type PaymentAllocation = {
+  itemCost: number;
+  deliveryFee: number;
+  deliveryCost: number;
+};
+
+/**
+ * Allocate matched payment rows against each sale's complete payment history.
+ * The period read stays on by_receivedDay; by_sale reads only supply the prior
+ * cumulative balance needed to make separate day queries additive.
+ */
+async function loadPaymentAllocations(
+  ctx: { db: QueryCtx["db"] },
+  matchedPayments: Doc<"payments">[]
+): Promise<Map<string, PaymentAllocation>> {
+  const saleIds = [...new Set(matchedPayments.map((payment) => payment.saleId))];
+  const allocationByPayment = new Map<string, PaymentAllocation>();
+
+  await Promise.all(
+    saleIds.map(async (saleId) => {
+      const [costs, salePayments] = await Promise.all([
+        orderCosts(ctx, saleId),
+        ctx.db
+          .query("payments")
+          .withIndex("by_sale", (q) => q.eq("saleId", saleId))
+          .collect(),
+      ]);
+      if (costs.total <= 0) return;
+
+      salePayments.sort(
+        (a, b) =>
+          a.receivedAt - b.receivedAt ||
+          a._creationTime - b._creationTime ||
+          String(a._id).localeCompare(String(b._id))
+      );
+      let cumulativeAmount = 0;
+      let previous: PaymentAllocation = { itemCost: 0, deliveryFee: 0, deliveryCost: 0 };
+      for (const payment of salePayments) {
+        cumulativeAmount += payment.amount;
+        const next = {
+          itemCost: Math.round((cumulativeAmount / costs.total) * costs.itemCost),
+          deliveryFee: Math.round((cumulativeAmount / costs.total) * costs.deliveryFee),
+          deliveryCost: Math.round((cumulativeAmount / costs.total) * costs.deliveryCost),
+        };
+        allocationByPayment.set(payment._id, {
+          itemCost: next.itemCost - previous.itemCost,
+          deliveryFee: next.deliveryFee - previous.deliveryFee,
+          deliveryCost: next.deliveryCost - previous.deliveryCost,
+        });
+        previous = next;
+      }
+    })
+  );
+
+  return allocationByPayment;
+}
+
 /**
  * Shared cash-basis P/L over a day-string range [from, to): the period's
  * payments (refunds net out) minus pro-rata COGS minus expenses. Used by
@@ -112,17 +170,7 @@ export async function computePl(
     .withIndex("by_receivedDay", (q) => q.gte("receivedDay", from).lt("receivedDay", to))
     .collect();
 
-  // One costs pass per sale, not per payment.
-  const saleIds = [...new Set(payments.map((p) => p.saleId))];
-  const costsBySale = new Map<
-    string,
-    { total: number; itemCost: number; deliveryFee: number; deliveryCost: number }
-  >();
-  await Promise.all(
-    saleIds.map(async (saleId) => {
-      costsBySale.set(saleId, await orderCosts(ctx, saleId));
-    })
-  );
+  const allocationByPayment = await loadPaymentAllocations(ctx, payments);
 
   let moneyIn = 0;
   let refunds = 0;
@@ -132,12 +180,11 @@ export async function computePl(
   for (const payment of payments) {
     moneyIn += payment.amount;
     if (payment.amount < 0) refunds += -payment.amount;
-    const costs = costsBySale.get(payment.saleId);
-    if (!costs || costs.total <= 0) continue;
-    const ratio = payment.amount / costs.total;
-    cogs += Math.round(ratio * costs.itemCost);
-    deliveryIncome += Math.round(ratio * costs.deliveryFee);
-    deliveryCost += Math.round(ratio * costs.deliveryCost);
+    const allocation = allocationByPayment.get(payment._id);
+    if (!allocation) continue;
+    cogs += allocation.itemCost;
+    deliveryIncome += allocation.deliveryFee;
+    deliveryCost += allocation.deliveryCost;
   }
 
   const expenseRows = await ctx.db
@@ -220,18 +267,7 @@ export const getReportCsv = query({
       .withIndex("by_spentDay", (q) => q.gte("spentDay", from).lt("spentDay", to))
       .collect();
 
-    // One costs pass per sale — never per payment (same math as getPlReport).
-    const saleIds = [...new Set(payments.map((p) => p.saleId))];
-    const costsBySale = new Map<
-      string,
-      { total: number; itemCost: number }
-    >();
-    await Promise.all(
-      saleIds.map(async (saleId) => {
-        const costs = await orderCosts(ctx, saleId);
-        costsBySale.set(saleId, { total: costs.total, itemCost: costs.itemCost });
-      })
-    );
+    const allocationByPayment = await loadPaymentAllocations(ctx, payments);
 
     // Group the rows by their day bucket, then walk the days in order —
     // days with no activity export a zero row too, so the CSV matches the
@@ -258,9 +294,7 @@ export const getReportCsv = query({
       for (const payment of paymentsByDay.get(day) ?? []) {
         moneyIn += payment.amount;
         if (payment.amount < 0) refunds += -payment.amount;
-        const costs = costsBySale.get(payment.saleId);
-        if (!costs || costs.total <= 0) continue;
-        cogs += Math.round((payment.amount / costs.total) * costs.itemCost);
+        cogs += allocationByPayment.get(payment._id)?.itemCost ?? 0;
       }
       const dayExpenses = expensesByDay.get(day) ?? 0;
       rows.push({
@@ -312,11 +346,10 @@ export const getChannelReport = query({
       .withIndex("by_receivedDay", (q) => q.gte("receivedDay", from).lt("receivedDay", to))
       .collect();
     const saleIds = [...new Set(payments.map((p) => p.saleId))];
-    const costsBySale = new Map<string, Awaited<ReturnType<typeof orderCosts>>>();
+    const allocationByPayment = await loadPaymentAllocations(ctx, payments);
     const saleById = new Map<string, (typeof salesInPeriod)[number]>();
     await Promise.all(
       saleIds.map(async (saleId) => {
-        costsBySale.set(saleId, await orderCosts(ctx, saleId));
         const sale = await ctx.db.get(saleId);
         if (sale) saleById.set(saleId, sale);
       })
@@ -338,16 +371,15 @@ export const getChannelReport = query({
     }
     for (const payment of payments) {
       const sale = saleById.get(payment.saleId);
-      const costs = costsBySale.get(payment.saleId);
-      if (!sale || !costs || costs.total <= 0) continue;
-      const ratio = payment.amount / costs.total;
+      const allocation = allocationByPayment.get(payment._id);
+      if (!sale || !allocation) continue;
       const entry =
         byChannel.get(sale.salesChannelId) ?? { orders: 0, revenue: 0, profit: 0 };
       entry.revenue += payment.amount;
       entry.profit +=
         payment.amount -
-        Math.round(ratio * costs.itemCost) -
-        Math.round(ratio * costs.deliveryCost);
+        allocation.itemCost -
+        allocation.deliveryCost;
       byChannel.set(sale.salesChannelId, entry);
     }
 

@@ -9,7 +9,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation } from "convex/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@convex/_generated/api";
@@ -34,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import {
   cn,
   formatDateTime,
@@ -78,6 +79,14 @@ export function PaymentHistory({
   const labels = t().sales;
   const receive = useMutation(api.payments.receive);
   const refund = useMutation(api.payments.refund);
+  const receiveSubmit = useIdempotentSubmit({
+    operation: "payments.receive",
+    resource: saleId,
+  });
+  const refundSubmit = useIdempotentSubmit({
+    operation: "payments.refund",
+    resource: saleId,
+  });
 
   const [tab, setTab] = useState("receive");
   const [amount, setAmount] = useState("");
@@ -86,6 +95,7 @@ export function PaymentHistory({
   const [refundAmount, setRefundAmount] = useState("");
   const [refundNote, setRefundNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [confirmRefund, setConfirmRefund] = useState(false);
 
   const amountCents = inputToCents(amount) ?? 0;
@@ -107,41 +117,51 @@ export function PaymentHistory({
   };
 
   async function doReceive() {
-    if (busy || amountCents <= 0 || amountCents > summary.remaining) return;
+    if (busyRef.current || amountCents <= 0 || amountCents > summary.remaining) return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      await receive({
+      const receivePayload = {
         saleId,
         amount: amountCents,
         method,
         note: note.trim() || undefined,
-      });
+      };
+      const idempotencyKey = receiveSubmit.begin(receivePayload);
+      await receive({ ...receivePayload, idempotencyKey });
+      receiveSubmit.complete(receivePayload, idempotencyKey);
       toast.success(labels.paymentAdded);
       setAmount("");
       setNote("");
     } catch (err) {
       toastError(err);
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
 
   async function doRefund() {
-    if (busy || refundCents <= 0 || refundCents > summary.refundable) return;
+    if (busyRef.current || refundCents <= 0 || refundCents > summary.refundable) return;
+    busyRef.current = true;
     setBusy(true);
     setConfirmRefund(false);
     try {
-      await refund({
+      const refundPayload = {
         saleId,
         amount: refundCents,
         note: refundNote.trim() || undefined,
-      });
+      };
+      const idempotencyKey = refundSubmit.begin(refundPayload);
+      await refund({ ...refundPayload, idempotencyKey });
+      refundSubmit.complete(refundPayload, idempotencyKey);
       toast.success(labels.refundAdded);
       setRefundAmount("");
       setRefundNote("");
     } catch (err) {
       toastError(err);
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }

@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ArrowDown01Icon,
+  ArrowUp01Icon,
   Cancel01Icon,
   Cash01Icon,
   Coins01Icon,
@@ -28,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { type CartLine } from "@/hooks/use-checkout-cart";
-import { formatMoney, getLang, t } from "@/lib/utils";
+import { cn, formatMoney, getLang, t } from "@/lib/utils";
 
 // POS v4 — the "Payment Checkout" popup (2xl Dialog on desktop, bottom Sheet
 // on phone). Three columns on desktop:
@@ -124,16 +126,23 @@ export function PosPaymentDialog({
   const [saleDate, setSaleDate] = useState<number>(() => localMidnight(Date.now()));
   const [saleDateDirty, setSaleDateDirty] = useState(false);
   const [paymentDate, setPaymentDate] = useState<number>(() => Date.now());
+  const [maxDate, setMaxDate] = useState(() => msToInput(Date.now()));
   const [paymentNote, setPaymentNote] = useState("");
   const [saleNote, setSaleNote] = useState("");
+  const [summaryOpen, setSummaryOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
-      setSaleDate(localMidnight(Date.now()));
+      const openedAt = Date.now();
+      // Opening the dialog starts a fresh transaction draft.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSaleDate(localMidnight(openedAt));
       setSaleDateDirty(false);
-      setPaymentDate(Date.now());
+      setPaymentDate(openedAt);
+      setMaxDate(msToInput(openedAt));
       setPaymentNote("");
       setSaleNote("");
+      setSummaryOpen(false);
     }
   }, [open]);
 
@@ -144,6 +153,15 @@ export function PosPaymentDialog({
     return line.price * line.qty - discountCents;
   };
 
+  function confirmPayment() {
+    onConfirm({
+      ...(saleDateDirty ? { createdAt: saleDate } : {}),
+      ...(paid ? { receivedAt: paymentDate } : {}),
+      ...(paymentNote.trim() ? { paymentNote: paymentNote.trim() } : {}),
+      ...(saleNote.trim() ? { saleNote: saleNote.trim() } : {}),
+    });
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Body — the middle scrolls (the summary items additionally scroll on
@@ -153,7 +171,28 @@ export function PosPaymentDialog({
         <div className="grid items-start gap-3 sm:grid-cols-3">
           {/* LEFT — Transaction Summary + Total Amount */}
           <div className="flex flex-col rounded-md border">
-            <p className="flex items-center gap-1.5 border-b px-3 py-2 text-sm font-semibold">
+            <button
+              type="button"
+              className="flex min-h-11 items-center gap-1.5 px-3 py-2 text-left text-sm font-semibold sm:hidden"
+              aria-expanded={summaryOpen}
+              onClick={() => setSummaryOpen((current) => !current)}
+            >
+              <HugeiconsIcon
+                icon={ShoppingCart01Icon}
+                strokeWidth={2}
+                className="size-4 text-muted-foreground"
+              />
+              {t().sales.transactionSummary}
+              <span className="ml-auto text-base font-bold tabular-nums">
+                {formatMoney(total, currency, getLang())}
+              </span>
+              <HugeiconsIcon
+                icon={summaryOpen ? ArrowUp01Icon : ArrowDown01Icon}
+                strokeWidth={2}
+                className="size-4 text-muted-foreground"
+              />
+            </button>
+            <p className="hidden items-center gap-1.5 border-b px-3 py-2 text-sm font-semibold sm:flex">
               <HugeiconsIcon
                 icon={ShoppingCart01Icon}
                 strokeWidth={2}
@@ -161,7 +200,12 @@ export function PosPaymentDialog({
               />
               {t().sales.transactionSummary}
             </p>
-            <div className="max-h-[40dvh] overflow-y-auto p-3">
+            <div
+              className={cn(
+                "max-h-[40dvh] overflow-y-auto border-t p-3 sm:block sm:border-t-0",
+                summaryOpen ? "block" : "hidden",
+              )}
+            >
               {cart.map((line) => (
                 <div
                   key={line.key ?? line.variantId}
@@ -184,7 +228,12 @@ export function PosPaymentDialog({
                 </p>
               )}
             </div>
-            <div className="flex items-center justify-between border-t px-3 py-2">
+            <div
+              className={cn(
+                "items-center justify-between border-t px-3 py-2 sm:flex",
+                summaryOpen ? "flex" : "hidden",
+              )}
+            >
               <span className="text-sm font-semibold">{t().sales.totalAmount}</span>
               <span className="text-lg font-bold tabular-nums">
                 {formatMoney(total, currency, getLang())}
@@ -334,7 +383,7 @@ export function PosPaymentDialog({
                     id="pos-payment-sale-date"
                     type="date"
                     value={msToInput(saleDate)}
-                    max={msToInput(Date.now())}
+                    max={maxDate}
                     onChange={(e) => {
                       const ms = inputToMs(e.target.value);
                       if (ms != null) {
@@ -353,7 +402,7 @@ export function PosPaymentDialog({
                       id="pos-payment-date"
                       type="date"
                       value={msToInput(paymentDate)}
-                      max={msToInput(Date.now())}
+                      max={maxDate}
                       onChange={(e) => {
                         const ms = inputToMs(e.target.value);
                         if (ms != null) setPaymentDate(ms);
@@ -443,6 +492,17 @@ export function PosPaymentDialog({
                 {t().sales.saleNoteHint}
               </p>
             </div>
+
+            <Button
+              type="button"
+              size="lg"
+              className="h-11 w-full sm:hidden"
+              disabled={!canComplete || completing}
+              onClick={confirmPayment}
+            >
+              <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="size-4" />
+              {t().sales.completePayment}
+            </Button>
           </div>
         </div>
       </div>
@@ -462,17 +522,10 @@ export function PosPaymentDialog({
         <Button
           type="button"
           size="lg"
-          className="ml-auto h-11"
+          className="ml-auto hidden h-11 sm:inline-flex"
           // Completing disables the button — no duplicate submissions.
           disabled={!canComplete || completing}
-          onClick={() =>
-            onConfirm({
-              ...(saleDateDirty ? { createdAt: saleDate } : {}),
-              ...(paid ? { receivedAt: paymentDate } : {}),
-              ...(paymentNote.trim() ? { paymentNote: paymentNote.trim() } : {}),
-              ...(saleNote.trim() ? { saleNote: saleNote.trim() } : {}),
-            })
-          }
+          onClick={confirmPayment}
         >
           <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="size-4" />
           {t().sales.completePayment}

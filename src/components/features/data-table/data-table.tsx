@@ -446,7 +446,7 @@ export function DataTable<TData extends RowData>({
 
       {/* Server pagination footer: page size 20 / 50 / 100, prev / next */}
       {totalCount !== undefined && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2">
+        <div className="sticky bottom-[calc(4rem+env(safe-area-inset-bottom))] z-30 flex flex-col items-center gap-2 border-t bg-background/95 px-3 py-3 backdrop-blur sm:flex-row sm:justify-between sm:px-4 sm:py-2 md:static md:bg-background md:backdrop-blur-none">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <span>{t().common.rowsPerPage}</span>
             <Select

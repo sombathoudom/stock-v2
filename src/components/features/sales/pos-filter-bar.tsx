@@ -56,7 +56,7 @@ export function PosFilterBar({
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
       {/* Search, category filter, clear, and the size chips — ONE wrapping
           flex row, so the whole header sits on a single line. */}
       <div className="min-w-40 flex-1 sm:max-w-56">
@@ -75,12 +75,12 @@ export function PosFilterBar({
 
       {/* Category — a grid of toggle chips (tap again to clear). */}
       {categories !== undefined && categories.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1">
+        <div className="flex max-w-full flex-nowrap items-center gap-1 overflow-x-auto pb-1 [scrollbar-width:none] sm:flex-wrap sm:overflow-visible sm:pb-0">
           <Button
             type="button"
             size="sm"
             variant={categoryFilter === "" ? "default" : "outline"}
-            className="h-7 px-2 text-xs"
+            className="h-7 shrink-0 px-2 text-xs"
             onClick={() => onCategoryFilter("")}
           >
             {t().sales.allCategories}
@@ -91,7 +91,7 @@ export function PosFilterBar({
               type="button"
               size="sm"
               variant={categoryFilter === c._id ? "default" : "outline"}
-              className="h-7 px-2 text-xs"
+              className="h-7 shrink-0 px-2 text-xs"
               onClick={() =>
                 onCategoryFilter(categoryFilter === c._id ? "" : c._id)
               }

@@ -6,6 +6,11 @@ import { mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import { assertCents, assertQty, dayString, getShop, requireUser } from "./helpers";
 import {
+  checkIdempotency,
+  recordIdempotency,
+  replayPurchaseId,
+} from "./idempotency";
+import {
   purchaseDetail,
   purchaseDoc,
   purchaseListItem,
@@ -118,20 +123,25 @@ async function validateLineValues(
 
 /**
  * Next display code, e.g. "PO-20260815-001" — day derived from the purchase's
- * business date (purchasedAt), not "now". Mutations serialize, so count + 1
- * never collides. Codes are display labels, never access keys (the UUID _id
- * is the public identifier).
+ * business date (purchasedAt), not "now". Use the highest suffix so a gap in
+ * existing codes cannot reuse a display code. Codes are display labels, never
+ * access keys (the UUID _id is the public identifier).
  */
 async function nextCode(ctx: MutationCtx, purchasedAt: number): Promise<string> {
   const shop = await getShop(ctx);
   const prefix = `PO-${dayString(purchasedAt, shop.timezone).replace(/-/g, "")}-`;
-  const count = (
-    await ctx.db
-      .query("purchases")
-      .withIndex("by_code", (q) => q.gte("code", prefix).lt("code", `${prefix}￿`))
-      .collect()
-  ).length;
-  return `${prefix}${String(count + 1).padStart(3, "0")}`;
+  const purchases = await ctx.db
+    .query("purchases")
+    .withIndex("by_code", (q) => q.gte("code", prefix).lt("code", `${prefix}￿`))
+    .collect();
+  let highestSequence = 0;
+  for (const purchase of purchases) {
+    const suffix = purchase.code.slice(prefix.length);
+    if (/^\d+$/.test(suffix)) {
+      highestSequence = Math.max(highestSequence, Number(suffix));
+    }
+  }
+  return `${prefix}${String(highestSequence + 1).padStart(3, "0")}`;
 }
 
 /** One ledger row: +qty in for this purchase line, stamped at the arrival date. */
@@ -170,6 +180,57 @@ async function clearPurchaseLedger(
       .withIndex("by_purchaseItem", (q) => q.eq("purchaseItemId", purchaseItemId))
       .collect();
     for (const row of rows) await ctx.db.delete(row._id);
+  }
+}
+
+/**
+ * A received-purchase rewrite removes its old movements before adding the new
+ * ones. Re-derive the resulting stock from the ledger first so stock already
+ * consumed by sales or adjustments can never be removed from underneath them.
+ */
+async function assertRewriteKeepsStockNonnegative(
+  ctx: MutationCtx,
+  existing: Doc<"purchaseItems">[],
+  lines: LineInput[],
+  isReceived: boolean
+) {
+  const clearedByVariant = new Map<Id<"productVariants">, number>();
+  for (const item of existing) {
+    const rows = await ctx.db
+      .query("stockLedger")
+      .withIndex("by_purchaseItem", (q) => q.eq("purchaseItemId", item._id))
+      .collect();
+    for (const row of rows) {
+      clearedByVariant.set(
+        row.variantId,
+        (clearedByVariant.get(row.variantId) ?? 0) + row.delta
+      );
+    }
+  }
+
+  const addedByVariant = new Map<Id<"productVariants">, number>();
+  if (isReceived) {
+    for (const line of lines) {
+      addedByVariant.set(line.variantId, (addedByVariant.get(line.variantId) ?? 0) + line.qty);
+    }
+  }
+
+  const variantIds = new Set([...clearedByVariant.keys(), ...addedByVariant.keys()]);
+  for (const variantId of variantIds) {
+    const currentRows = await ctx.db
+      .query("stockLedger")
+      .withIndex("by_variant_ts", (q) => q.eq("variantId", variantId))
+      .collect();
+    const currentStock = currentRows.reduce((sum, row) => sum + row.delta, 0);
+    const stockAfterRewrite =
+      currentStock - (clearedByVariant.get(variantId) ?? 0) +
+      (addedByVariant.get(variantId) ?? 0);
+    if (stockAfterRewrite < 0) {
+      throw new ConvexError({
+        code: "OUT_OF_STOCK",
+        message: "This purchase can't be changed because some of its stock has already been used.",
+      });
+    }
   }
 }
 
@@ -214,6 +275,7 @@ async function applySalePrices(
 // fills the arrival date on edit.
 export const create = mutation({
   args: {
+    idempotencyKey: v.string(),
     supplierId: v.id("suppliers"),
     purchasedAt: v.number(),
     receivedAt: v.optional(v.number()),
@@ -232,9 +294,30 @@ export const create = mutation({
   returns: purchaseDoc,
   handler: async (ctx, args) => {
     const { staff } = await requireUser(ctx);
+    const { idempotencyKey, ...payload } = args;
+    const idempotency = await checkIdempotency(
+      ctx,
+      staff._id,
+      "purchases.create",
+      idempotencyKey,
+      payload
+    );
+    if (idempotency.replay !== null) {
+      const purchase = await ctx.db.get(replayPurchaseId(idempotency.replay));
+      if (!purchase) {
+        throw new ConvexError({ code: "NOT_FOUND", message: "Purchase not found." });
+      }
+      return purchase;
+    }
     const supplier = await ctx.db.get(args.supplierId);
     if (!supplier) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Supplier not found." });
+    }
+    if (!supplier.active) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "That supplier is no longer active.",
+      });
     }
     const purchasedAt = assertDate(args.purchasedAt, "Purchase date");
     let receivedAt: number | undefined;
@@ -292,6 +375,14 @@ export const create = mutation({
       }
     }
     await applySalePrices(ctx, lines, variantById);
+    await recordIdempotency(
+      ctx,
+      staff._id,
+      "purchases.create",
+      idempotencyKey,
+      idempotency.hash,
+      { kind: "purchase", id: purchaseId }
+    );
     return (await ctx.db.get(purchaseId))!;
   },
 });
@@ -334,6 +425,14 @@ export const update = mutation({
     if (!supplier) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Supplier not found." });
     }
+    // Existing purchases remain editable after their supplier is deactivated,
+    // but a deactivated supplier cannot be newly assigned to another purchase.
+    if (!supplier.active && supplier._id !== purchase.supplierId) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "That supplier is no longer active.",
+      });
+    }
 
     // Dates: provided values are asserted; absent ones keep the stored values
     // (purchasedAt always exists after the backfill — createdAt is a
@@ -342,14 +441,12 @@ export const update = mutation({
     const effectivePurchasedAt = args.purchasedAt ?? purchase.purchasedAt ?? purchase.createdAt;
     const effectiveReceivedAt: number | undefined =
       args.receivedAt === undefined ? (purchase.receivedAt ?? undefined) : args.receivedAt ?? undefined;
-    if (typeof args.receivedAt === "number") {
-      const receivedAt = assertDate(args.receivedAt, "Arrival date");
-      if (receivedAt < effectivePurchasedAt) {
-        throw new ConvexError({
-          code: "INVALID_INPUT",
-          message: "The arrival date can't be before the purchase date.",
-        });
-      }
+    if (typeof args.receivedAt === "number") assertDate(args.receivedAt, "Arrival date");
+    if (effectiveReceivedAt !== undefined && effectiveReceivedAt < effectivePurchasedAt) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "The arrival date can't be before the purchase date.",
+      });
     }
 
     // Costs: provided values are asserted (undefined = keep, null = clear).
@@ -436,7 +533,10 @@ export const update = mutation({
     const isReceived = effectiveReceivedAt != null;
     const receivedAtChanged =
       args.receivedAt !== undefined && args.receivedAt !== purchase.receivedAt;
-    if (wasReceived !== isReceived || (isReceived && (receivedAtChanged || membershipChanged))) {
+    const rewritesLedger =
+      wasReceived !== isReceived || (isReceived && (receivedAtChanged || membershipChanged));
+    if (rewritesLedger) {
+      await assertRewriteKeepsStockNonnegative(ctx, existing, lines, isReceived);
       await clearPurchaseLedger(ctx, involvedIds);
       if (isReceived) {
         for (let i = 0; i < lines.length; i++) {

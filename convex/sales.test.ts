@@ -8,6 +8,12 @@ import { dayString } from "./helpers";
 import schema from "./schema";
 
 const AUTH_USER_ID = "test-auth-user";
+let requestKeySequence = 0;
+
+function requestKey(operation: string): string {
+  requestKeySequence += 1;
+  return `${operation}-${requestKeySequence}`;
+}
 
 // Sign-in is the ONE thing faked here. `authComponent` is the better-auth
 // Convex component, which has no in-memory equivalent — so it's replaced with
@@ -119,20 +125,20 @@ async function seed(t: ReturnType<typeof convexTest>) {
 /** Every ledger row for a variant, read the way the app reads it. */
 async function ledgerRows(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   return await t.run(async (ctx: MutationCtx) =>
     ctx.db
       .query("stockLedger")
       .withIndex("by_variant_ts", (q) => q.eq("variantId", variantId))
-      .collect()
+      .collect(),
   );
 }
 
 /** Stock the way the app computes it: the sum of the variant's ledger deltas. */
 async function stockOf(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   const rows = await ledgerRows(t, variantId);
   return rows.reduce((sum, row) => sum + row.delta, 0);
@@ -140,7 +146,7 @@ async function stockOf(
 
 async function movementCount(
   t: ReturnType<typeof convexTest>,
-  variantId: Id<"productVariants">
+  variantId: Id<"productVariants">,
 ) {
   return (await ledgerRows(t, variantId)).length;
 }
@@ -150,9 +156,14 @@ async function createSale(
   t: ReturnType<typeof convexTest>,
   ids: Awaited<ReturnType<typeof seed>>,
   lines: { variantId: Id<"productVariants">; qty: number }[],
-  extra: { deliveryFee?: number; discount?: number } = {}
+  extra: {
+    deliveryFee?: number;
+    discount?: number;
+    idempotencyKey?: string;
+  } = {},
 ) {
   return await t.mutation(api.sales.checkout, {
+    idempotencyKey: extra.idempotencyKey ?? requestKey("checkout"),
     customerId: ids.customerId,
     salesChannelId: ids.channelId,
     discount: extra.discount ?? 0,
@@ -191,16 +202,20 @@ describe("sales.checkout", () => {
       }
     });
 
-    const created = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const created = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
     expect(created.sale.code).toBe(`${prefix}004`);
 
     const codes = await t.run(async (ctx) =>
       (
         await ctx.db
           .query("sales")
-          .withIndex("by_code", (q) => q.gte("code", prefix).lt("code", `${prefix}￿`))
+          .withIndex("by_code", (q) =>
+            q.gte("code", prefix).lt("code", `${prefix}￿`),
+          )
           .collect()
-      ).map((sale) => sale.code)
+      ).map((sale) => sale.code),
     );
     expect(new Set(codes).size).toBe(codes.length);
   });
@@ -209,7 +224,9 @@ describe("sales.checkout", () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
-    const second = await createSale(t, ids, [{ variantId: ids.variantL, qty: 1 }]);
+    const second = await createSale(t, ids, [
+      { variantId: ids.variantL, qty: 1 },
+    ]);
 
     const result = await t.query(api.sales.list, {
       paginationOpts: { numItems: 20, cursor: null },
@@ -232,10 +249,13 @@ describe("sales.saveEdit", () => {
   test("adds a new line and deducts its stock", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     expect(await stockOf(t, ids.variantM)).toBe(8);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: sale.items[0].item._id, qty: 2 },
@@ -262,6 +282,7 @@ describe("sales.saveEdit", () => {
     const mLine = sale.items.find((i) => i.variant._id === ids.variantM)!;
     const lLine = sale.items.find((i) => i.variant._id === ids.variantL)!;
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: mLine.item._id, qty: 0 },
@@ -275,16 +296,21 @@ describe("sales.saveEdit", () => {
     const removed = after.items.find((i) => i.item._id === mLine.item._id)!;
     expect(billed(removed.item)).toBe(0);
     expect(after.total).toBe(1000); // only the remaining L line
-    expect(after.events.some((e) => e.event.type === "item_removed")).toBe(true);
+    expect(after.events.some((e) => e.event.type === "item_removed")).toBe(
+      true,
+    );
   });
 
   test("raising a quantity deducts only the extra pieces", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     const before = await movementCount(t, ids.variantM);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: sale.items[0].item._id, qty: 5 }],
     });
@@ -302,10 +328,13 @@ describe("sales.saveEdit", () => {
   test("lowering a quantity returns only the difference", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 5 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 5 },
+    ]);
     expect(await stockOf(t, ids.variantM)).toBe(5);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: sale.items[0].item._id, qty: 2 }],
     });
@@ -313,19 +342,24 @@ describe("sales.saveEdit", () => {
     expect(await stockOf(t, ids.variantM)).toBe(8); // 3 pieces came back
     expect(billed(after.items[0].item)).toBe(2);
     expect(after.total).toBe(2000);
-    expect(after.events.some((e) => e.event.type === "item_qty_changed")).toBe(true);
+    expect(after.events.some((e) => e.event.type === "item_qty_changed")).toBe(
+      true,
+    );
   });
 
   test("rejects a save that needs more stock than the shelf has", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
 
     await expect(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [{ saleItemId: sale.items[0].item._id, qty: 99 }],
-      })
+      }),
     ).rejects.toThrow();
 
     expect(await stockOf(t, ids.variantM)).toBe(8); // unchanged
@@ -344,6 +378,7 @@ describe("sales.saveEdit", () => {
     // Net zero: −4 on the first line funds +4 on the second, even though the
     // shelf never holds a single spare piece.
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: sale.items[0].item._id, qty: 2 },
@@ -358,32 +393,42 @@ describe("sales.saveEdit", () => {
   test("changes the order status and records it in the history", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: sale.items[0].item._id, qty: 2 }],
       status: "packed",
     });
 
     expect(after.sale.status).toBe("packed");
-    expect(after.events.some((e) => e.event.type === "status_changed")).toBe(true);
+    expect(after.events.some((e) => e.event.type === "status_changed")).toBe(
+      true,
+    );
   });
 
   test("can set the status to pending from the edit page", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     const movementsBefore = await movementCount(t, ids.variantM);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: sale.items[0].item._id, qty: 2 }],
       status: "pending",
     });
 
     expect(after.sale.status).toBe("pending");
-    expect(after.events.some((e) => e.event.type === "status_changed")).toBe(true);
+    expect(after.events.some((e) => e.event.type === "status_changed")).toBe(
+      true,
+    );
     // Pending reserves what checkout already took out — no new movement.
     expect(await stockOf(t, ids.variantM)).toBe(8);
     expect(await movementCount(t, ids.variantM)).toBe(movementsBefore);
@@ -392,9 +437,12 @@ describe("sales.saveEdit", () => {
   test("re-derives the total on the server from the order's own rows", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 3 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 3 },
+    ]);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: sale.items[0].item._id, qty: 3, discount: 500 }],
       discount: 200,
@@ -409,7 +457,9 @@ describe("sales.saveEdit", () => {
   test("rolls back every line when a later step of the save fails", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     const movementsBefore = await movementCount(t, ids.variantM);
 
     // The line edits are applied first and the status step throws after them —
@@ -417,19 +467,22 @@ describe("sales.saveEdit", () => {
     // already-written line changes have to vanish with it.
     await expect(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [
           { saleItemId: sale.items[0].item._id, qty: 4 },
           { variantId: ids.variantL, qty: 2 },
         ],
         status: "draft",
-      })
+      }),
     ).rejects.toThrow();
 
     expect(await stockOf(t, ids.variantM)).toBe(8); // not 6
     expect(await stockOf(t, ids.variantL)).toBe(10); // the new line never landed
     expect(await movementCount(t, ids.variantM)).toBe(movementsBefore);
-    const reloaded = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
+    const reloaded = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
     expect(reloaded!.items).toHaveLength(1);
     expect(billed(reloaded!.items[0].item)).toBe(2);
     expect(reloaded!.sale.status).toBe("confirmed");
@@ -438,12 +491,15 @@ describe("sales.saveEdit", () => {
   test("adds the same variant again as its own separate line", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     expect(await stockOf(t, ids.variantM)).toBe(8);
 
     // The same item added twice stays two lines (checkout rule) — the edit
     // page does not merge them either.
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [
         { saleItemId: sale.items[0].item._id, qty: 2 },
@@ -460,7 +516,9 @@ describe("sales.saveEdit", () => {
   test("refuses to bill less than what was already delivered", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 3 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 3 },
+    ]);
     await t.mutation(api.sales.setLineDelivered, {
       saleId: sale.sale._id,
       adjustments: [{ saleItemId: sale.items[0].item._id, qtyDelivered: 3 }],
@@ -468,25 +526,30 @@ describe("sales.saveEdit", () => {
 
     await expect(
       t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
         saleId: sale.sale._id,
         items: [{ saleItemId: sale.items[0].item._id, qty: 1 }],
-      })
+      }),
     ).rejects.toThrow();
   });
 
   test("records a price change in the order history", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
 
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [{ saleItemId: sale.items[0].item._id, qty: 2, price: 550 }],
     });
 
     expect(after.total).toBe(1100);
     const event = after.events.find(
-      (e) => e.event.type === "sale_edited" && e.event.payload?.field === "price"
+      (e) =>
+        e.event.type === "sale_edited" && e.event.payload?.field === "price",
     );
     expect(event).toBeDefined();
     expect(event!.event.summary).toContain("5.50");
@@ -499,10 +562,13 @@ describe("sales.saveEdit", () => {
       { variantId: ids.variantM, qty: 2 },
       { variantId: ids.variantL, qty: 3 },
     ]);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
 
     // Only the note changes — a dropped row must never cancel stock by itself.
     const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
       saleId: sale.sale._id,
       items: [],
       note: "Call before delivery",
@@ -518,7 +584,9 @@ describe("sales.setStatus — pending", () => {
   test("confirmed → pending → confirmed writes only history, no stock", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     const movementsBefore = await movementCount(t, ids.variantM);
     expect(await stockOf(t, ids.variantM)).toBe(8);
 
@@ -552,7 +620,9 @@ describe("sales.setStatus — pending", () => {
   test("pending → cancelled flows the reserved stock back", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     await t.mutation(api.sales.setStatus, {
       saleId: sale.sale._id,
       status: "pending",
@@ -572,7 +642,9 @@ describe("sales.setStatus — pending", () => {
   test("a later stage can never regress to pending", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     await t.mutation(api.sales.setStatus, {
       saleId: sale.sale._id,
       status: "delivering",
@@ -582,10 +654,12 @@ describe("sales.setStatus — pending", () => {
       t.mutation(api.sales.setStatus, {
         saleId: sale.sale._id,
         status: "pending",
-      })
+      }),
     ).rejects.toThrow();
 
-    const reloaded = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
+    const reloaded = await t.query(api.sales.getDetail, {
+      saleId: sale.sale._id,
+    });
     expect(reloaded!.sale.status).toBe("delivering");
     expect(await stockOf(t, ids.variantM)).toBe(8);
   });
@@ -593,7 +667,9 @@ describe("sales.setStatus — pending", () => {
   test("a pending order with a balance appears in the still-owed list", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 2 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 2 },
+    ]);
     await t.mutation(api.sales.setStatus, {
       saleId: sale.sale._id,
       status: "pending",
@@ -612,9 +688,13 @@ describe("sales.getEditData", () => {
   test("caps each line at what it bills plus what is on the shelf", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
-    const sale = await createSale(t, ids, [{ variantId: ids.variantM, qty: 4 }]);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 4 },
+    ]);
 
-    const data = await t.query(api.sales.getEditData, { saleId: sale.sale._id });
+    const data = await t.query(api.sales.getEditData, {
+      saleId: sale.sale._id,
+    });
 
     expect(data).not.toBeNull();
     const line = data!.items[0];

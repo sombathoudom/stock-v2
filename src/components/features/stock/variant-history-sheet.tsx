@@ -20,7 +20,6 @@ import type { Id } from "@convex/_generated/dataModel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -178,7 +177,7 @@ export function VariantHistorySheet({
 
   const history = useQuery(
     api.stock.variantHistory,
-    user == null || variant === undefined
+    user == null || variant === undefined || !open
       ? "skip"
       : {
           variantId: variant.variantId,
@@ -194,17 +193,19 @@ export function VariantHistorySheet({
 
   // The server returns {row, userName, balance, reference?} — flatten to the
   // projection shape the pure module works with.
-  const rows: MovementRow[] = (history?.page ?? []).map(
-    ({ row, userName, balance, reference }) => ({
-      _id: row._id,
-      ts: row.ts,
-      delta: row.delta,
-      reason: row.reason,
-      note: row.note,
-      userName,
-      balance,
-      reference,
-    })
+  const rows = useMemo<MovementRow[]>(
+    () =>
+      (history?.page ?? []).map(({ row, userName, balance, reference }) => ({
+        _id: row._id,
+        ts: row.ts,
+        delta: row.delta,
+        reason: row.reason,
+        note: row.note,
+        userName,
+        balance,
+        reference,
+      })),
+    [history?.page]
   );
   const summary = history?.summary;
   const total = history?.total ?? 0;
@@ -300,7 +301,11 @@ export function VariantHistorySheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" keepMounted className="w-full! overflow-hidden sm:max-w-2xl!">
+      <SheetContent
+        side="right"
+        className="w-full! overflow-hidden sm:max-w-2xl!"
+        overlayClassName="bg-black/20 supports-backdrop-filter:backdrop-blur-none"
+      >
         <SheetHeader>
           <SheetTitle className="truncate">{productName}</SheetTitle>
           <SheetDescription className="flex flex-col gap-1">
@@ -516,7 +521,7 @@ export function VariantHistorySheet({
           </div>
         ) : null}
 
-        <ScrollArea className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pe-1">
           {loading ? (
             <div className="flex flex-col gap-2 py-2">
               {Array.from({ length: 6 }).map((_, i) => (
@@ -568,7 +573,7 @@ export function VariantHistorySheet({
                     <div key={group.key} className="rounded-md border p-3">
                       <p className="text-sm font-medium">
                         {href ? (
-                          <Link href={href} className="hover:underline">
+                          <Link href={href} prefetch={false} className="hover:underline">
                             {ref?.kind === "order"
                               ? labels.referenceOrder.replace(
                                   "{code}",
@@ -598,6 +603,7 @@ export function VariantHistorySheet({
                         {href ? (
                           <Link
                             href={href}
+                            prefetch={false}
                             className="text-sm font-medium hover:underline"
                           >
                             {ref?.kind === "order"
@@ -787,7 +793,7 @@ export function VariantHistorySheet({
               </Button>
             </div>
           )}
-        </ScrollArea>
+        </div>
       </SheetContent>
     </Sheet>
   );

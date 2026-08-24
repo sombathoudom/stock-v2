@@ -311,4 +311,26 @@ export default defineSchema({
     userId: v.id("users"),
     ts: v.number(),
   }).index("by_sale_ts", ["saleId", "ts"]),
+
+  // One key is scoped to the authenticated staff member and exact operation.
+  idempotencyRecords: defineTable({
+    userId: v.id("users"),
+    operation: v.union(
+      v.literal("sales.checkout"),
+      v.literal("sales.saveEdit"),
+      v.literal("purchases.create"),
+      v.literal("payments.receive"),
+      v.literal("payments.refund"),
+      v.literal("adjustments.adjustStock")
+    ),
+    key: v.string(),
+    requestHash: v.string(),
+    result: v.union(
+      v.object({ kind: v.literal("sale"), id: v.id("sales") }),
+      v.object({ kind: v.literal("purchase"), id: v.id("purchases") }),
+      v.object({ kind: v.literal("payment"), id: v.id("payments") }),
+      v.object({ kind: v.literal("stockLedger"), id: v.id("stockLedger") })
+    ),
+    createdAt: v.number(),
+  }).index("by_scope", ["userId", "operation", "key"]),
 });

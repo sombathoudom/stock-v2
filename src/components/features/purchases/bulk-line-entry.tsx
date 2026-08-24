@@ -146,6 +146,8 @@ export function BulkLineEntry({
         if (sa !== sb) return sa - sb;
         return (colorOrder.get(a.color ?? "") ?? 0) - (colorOrder.get(b.color ?? "") ?? 0);
       });
+    // The rows initialize only after the selected product's async variants arrive.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRows(
       [...active, ...inactive].map((v) => {
         const currentPrice = v.price ?? product.defaultPrice;
@@ -166,6 +168,7 @@ export function BulkLineEntry({
         };
       })
     );
+    // The parent remounts this editor for each mode; these are initial values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product, variants]);
 
@@ -229,7 +232,6 @@ export function BulkLineEntry({
       });
     }
     return { drafts: out, invalid: bad };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, product, lines, editLine]);
 
   function submit() {

@@ -113,25 +113,14 @@ export function setServerLang(lang: Language) {
 }
 
 export function getLang(): Language {
-  if (typeof window === "undefined") return serverLang;
-  try {
-    const stored = window.localStorage.getItem("pos:lang");
-    if (stored === "km" || stored === "en") return stored;
-  } catch {
-    // ignore
-  }
-  // localStorage empty (fresh device): fall back to the cookie the server
-  // rendered with, so hydration still matches the HTML above the fold.
-  try {
-    const match = document.cookie.match(/(?:^|;\s*)pos_lang=([^;]+)/);
-    if (match && (match[1] === "km" || match[1] === "en")) return match[1];
-  } catch {
-    // ignore
-  }
-  return "en";
+  // RootLayout and ConvexClientProvider set the same cookie-derived value in
+  // their respective module graphs before children render. Reading that value
+  // directly keeps SSR and the first browser render byte-for-byte identical.
+  return serverLang;
 }
 
 export function setLang(lang: Language) {
+  serverLang = lang;
   try {
     window.localStorage.setItem("pos:lang", lang);
   } catch {

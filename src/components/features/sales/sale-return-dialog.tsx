@@ -94,7 +94,6 @@ function ReturnForm({
   onClose: () => void;
 }) {
   const returnItems = useMutation(api.sales.returnItems);
-  const refund = useMutation(api.payments.refund);
 
   // Pieces currently in the customer's hands are the only ones that can come
   // back — the server enforces the same bound. `withCustomer` is the derived
@@ -125,16 +124,17 @@ function ReturnForm({
           saleItemId: line.item._id,
           qty,
         })),
+        ...(refundCents > 0
+          ? {
+              refund: {
+                amount: refundCents,
+                note: `Return — ${picks
+                  .map(({ line, qty }) => `${lineLabel(line)} ×${qty}`)
+                  .join(", ")}`.slice(0, 200),
+              },
+            }
+          : {}),
       });
-      if (refundCents > 0) {
-        await refund({
-          saleId: detail.sale._id,
-          amount: refundCents,
-          note: `Return — ${picks
-            .map(({ line, qty }) => `${lineLabel(line)} ×${qty}`)
-            .join(", ")}`.slice(0, 200),
-        });
-      }
       toast.success(t().sales.itemsReturned);
       onClose();
     } catch (err) {

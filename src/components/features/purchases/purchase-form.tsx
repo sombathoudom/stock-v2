@@ -11,7 +11,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { FormProvider, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -62,6 +62,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { centsToInput, formatMoney, imageUrl, inputToCents, t, toastError } from "@/lib/utils";
 import {
   BulkLineEntry,
@@ -141,6 +142,10 @@ export function PurchaseForm({
 
   const create = useMutation(api.purchases.create);
   const update = useMutation(api.purchases.update);
+  const createSubmit = useIdempotentSubmit({
+    operation: "purchases.create",
+    resource: "new",
+  });
 
   const [lines, setLines] = useState<PurchaseLine[]>(
     () =>
@@ -158,6 +163,7 @@ export function PurchaseForm({
   );
   const [editLine, setEditLine] = useState<PurchaseLine | null>(null);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   // Set when the owner clears the arrival date of a received purchase —
   // needs one confirm before the stock is taken back off the shelves.
   const [pendingUnarrive, setPendingUnarrive] = useState<PurchaseValues | null>(
@@ -280,6 +286,7 @@ export function PurchaseForm({
 
   /** Create or update with the full line set. Returns on error. */
   async function doSave(values: PurchaseValues) {
+    if (savingRef.current) return;
     if (!values.supplierId) {
       toast.error(t().purchases.needSupplier);
       return;
@@ -288,6 +295,7 @@ export function PurchaseForm({
       toast.error(t().purchases.needLines);
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     try {
       // Optional costs: "" → null (none); the schema guarantees parseable
@@ -319,7 +327,7 @@ export function PurchaseForm({
         toast.success(t().purchases.saved);
         onDone();
       } else {
-        const created = await create({
+        const createPayload = {
           supplierId: values.supplierId as Id<"suppliers">,
           notes: values.notes.trim() || undefined,
           purchasedAt: values.purchasedDate ?? Date.now(),
@@ -329,14 +337,23 @@ export function PurchaseForm({
           ...(values.arrivalDate != null ? { receivedAt: values.arrivalDate } : {}),
           ...(deliveryCost != null ? { deliveryCost } : {}),
           ...(otherCost != null ? { otherCost } : {}),
-          lines: linePayload,
-        });
+          lines: lines.map((line) => ({
+            variantId: line.variantId,
+            qty: line.qty,
+            unitCost: line.unitCost,
+            ...(line.price !== undefined ? { price: line.price } : {}),
+          })),
+        };
+        const idempotencyKey = createSubmit.begin(createPayload);
+        const created = await create({ ...createPayload, idempotencyKey });
+        createSubmit.complete(createPayload, idempotencyKey);
         toast.success(t().purchases.created);
         router.push(`/purchases/${created._id}`);
       }
     } catch (err) {
       toastError(err);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -765,10 +782,12 @@ function QuickAddSupplier({
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [open, setOpen] = useState(false);
 
   async function submit() {
-    if (!name.trim()) return;
+    if (busyRef.current || !name.trim()) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       const supplier = await createSupplier({
@@ -782,6 +801,7 @@ function QuickAddSupplier({
     } catch (err) {
       toastError(err);
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
