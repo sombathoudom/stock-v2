@@ -702,6 +702,7 @@ export const stocktakeVariant = v.object({
   productId: v.id("products"),
   label: v.string(),
   qty: v.number(),
+  imageStorageId: v.optional(v.id("_storage")),
 });
 
 /** One recent adjustment/stocktake history row, newest first. */

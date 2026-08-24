@@ -1,6 +1,10 @@
 "use client";
 
-import { ClipboardCheckIcon, RotateCwSquareIcon } from "@hugeicons/core-free-icons";
+import {
+  ClipboardCheckIcon,
+  Image01Icon,
+  RotateCwSquareIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
@@ -25,7 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import { useShop } from "@/hooks/use-shop";
-import { formatDateTime, getLang, t, toastError } from "@/lib/utils";
+import { cn, formatDateTime, getLang, imageUrl, t, toastError } from "@/lib/utils";
 
 // T22 — Stock adjustments + stocktake (AGENTS.md). Quick manual in/out per
 // variant with a reason note (damaged, found, giveaway…) and a full
@@ -37,6 +41,38 @@ type StocktakeVariant = NonNullable<
   FunctionReturnType<typeof api.adjustments.stocktakeList>
 >[number];
 type RecentChange = NonNullable<FunctionReturnType<typeof api.adjustments.recentChanges>>[number];
+
+// Shared product thumbnail — same pattern as stock page and sale edit table.
+function ProductThumb({
+  storageId,
+  size = "sm",
+}: {
+  storageId?: string;
+  size?: "sm" | "md";
+}) {
+  const dim = size === "md" ? "size-12" : "size-9";
+  const icon = size === "md" ? "size-5" : "size-4";
+  if (storageId) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={imageUrl(storageId)}
+        alt=""
+        className={cn(dim, "shrink-0 rounded-md border object-cover")}
+      />
+    );
+  }
+  return (
+    <span
+      className={cn(
+        dim,
+        "flex shrink-0 items-center justify-center rounded-md border bg-muted text-muted-foreground",
+      )}
+    >
+      <HugeiconsIcon icon={Image01Icon} strokeWidth={2} className={icon} />
+    </span>
+  );
+}
 
 export default function AdjustmentsPage() {
   const user = useCurrentUser();
@@ -167,28 +203,77 @@ function QuickAdjustment({
             placeholder={t().adjustments.searchItems}
           />
           {loading ? (
-            <Skeleton className="h-24 w-full" />
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full rounded-lg" />
+              ))}
+            </div>
           ) : filtered.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t().adjustments.noItems}</p>
           ) : (
-            <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto">
-              {filtered.map((item) => (
-                <li key={item.variantId}>
-                  <Button
-                    type="button"
-                    variant={item.variantId === selectedId ? "default" : "outline"}
-                    className="flex w-full items-center justify-between gap-2"
-                    onClick={() =>
-                      setSelectedId(item.variantId === selectedId ? null : item.variantId)
-                    }
-                  >
-                    <span className="truncate">{item.label}</span>
-                    <span className="shrink-0 text-xs opacity-80">
-                      {t().adjustments.inStock}: {String(item.qty)}
-                    </span>
-                  </Button>
-                </li>
-              ))}
+            <ul className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+              {filtered.map((item) => {
+                const isSelected = item.variantId === selectedId;
+                return (
+                  <li key={item.variantId}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedId(item.variantId === selectedId ? null : item.variantId)
+                      }
+                      className={cn(
+                        "flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors",
+                        isSelected
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background hover:bg-muted",
+                      )}
+                    >
+                      {/* Product thumbnail */}
+                      <span className={cn(
+                        "flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-md border",
+                        isSelected ? "border-primary-foreground/20" : "border-border bg-muted",
+                      )}>
+                        {item.imageStorageId ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={imageUrl(item.imageStorageId)}
+                            alt=""
+                            className="size-full object-cover"
+                          />
+                        ) : (
+                          <HugeiconsIcon
+                            icon={Image01Icon}
+                            strokeWidth={2}
+                            className={cn(
+                              "size-4",
+                              isSelected ? "text-primary-foreground/60" : "text-muted-foreground",
+                            )}
+                          />
+                        )}
+                      </span>
+
+                      {/* Label */}
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                        {item.label}
+                      </span>
+
+                      {/* Stock badge */}
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
+                          isSelected
+                            ? "bg-primary-foreground/20 text-primary-foreground"
+                            : item.qty === 0
+                              ? "bg-destructive/10 text-destructive"
+                              : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {String(item.qty)}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </CardContent>
@@ -201,9 +286,16 @@ function QuickAdjustment({
             {direction === "in" ? t().adjustments.stockIn : t().adjustments.stockOut}
           </CardTitle>
           <CardDescription>
-            {selected
-              ? `${selected.label} — ${t().adjustments.inStock}: ${String(selected.qty)}`
-              : t().adjustments.pickFirst}
+            {selected ? (
+              <span className="flex items-center gap-2">
+                <ProductThumb storageId={selected.imageStorageId} size="sm" />
+                <span>
+                  {selected.label} — {t().adjustments.inStock}: {String(selected.qty)}
+                </span>
+              </span>
+            ) : (
+              t().adjustments.pickFirst
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -352,11 +444,15 @@ function StocktakePanel({
             placeholder={t().adjustments.searchItems}
           />
           {loading ? (
-            <Skeleton className="h-40 w-full" />
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full rounded-lg" />
+              ))}
+            </div>
           ) : filtered.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t().adjustments.noItems}</p>
           ) : (
-            <ul className="flex flex-col">
+            <ul className="flex flex-col divide-y">
               {filtered.map((item) => {
                 const text = counts.get(item.variantId);
                 const n = text === undefined || text === "" ? null : Number(text);
@@ -365,19 +461,30 @@ function StocktakePanel({
                 return (
                   <li
                     key={item.variantId}
-                    className="flex items-center justify-between gap-3 border-b py-2 last:border-b-0"
+                    className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0"
                   >
-                    <div className="flex min-w-0 flex-col">
+                    {/* Product thumbnail */}
+                    <ProductThumb storageId={item.imageStorageId} size="md" />
+
+                    {/* Label + system stock + delta */}
+                    <div className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-sm font-medium">{item.label}</span>
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-xs text-muted-foreground">
                         {t().adjustments.inStock}: {String(item.qty)}
                       </span>
                       {differs && n !== null && (
-                        <span className="text-xs text-destructive">
+                        <span
+                          className={cn(
+                            "text-xs font-medium",
+                            n - item.qty > 0 ? "text-primary" : "text-destructive",
+                          )}
+                        >
                           {n - item.qty > 0 ? `+${n - item.qty}` : String(n - item.qty)}
                         </span>
                       )}
                     </div>
+
+                    {/* Count input */}
                     <Input
                       type="number"
                       inputMode="numeric"
@@ -385,11 +492,10 @@ function StocktakePanel({
                       value={text ?? String(item.qty)}
                       onChange={(e) => setCount(item.variantId, e.target.value)}
                       aria-label={`${item.label} ${t().adjustments.countedCol}`}
-                      className={
-                        differs
-                          ? "w-20 border-destructive text-right"
-                          : "w-20 text-right"
-                      }
+                      className={cn(
+                        "w-20 text-right",
+                        differs && "border-destructive",
+                      )}
                     />
                   </li>
                 );
@@ -461,11 +567,10 @@ function RecentChanges({
                   </span>
                 </div>
                 <span
-                  className={
-                    row.delta > 0
-                      ? "shrink-0 font-medium"
-                      : "shrink-0 font-medium text-destructive"
-                  }
+                  className={cn(
+                    "shrink-0 font-medium",
+                    row.delta < 0 && "text-destructive",
+                  )}
                 >
                   {row.delta > 0 ? `+${row.delta}` : String(row.delta)}
                 </span>

@@ -155,6 +155,7 @@ export const stocktakeList = query({
           productId: product._id,
           label: variantLabel(product, variant),
           qty: await variantQty(ctx, variant._id),
+          ...(product.imageStorageId ? { imageStorageId: product.imageStorageId } : {}),
         });
       }
     }
