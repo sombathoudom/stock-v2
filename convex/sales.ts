@@ -98,17 +98,24 @@ export async function weightedAvgCost(
   return variant.cost ?? product.defaultCost;
 }
 
-/** Next display code "20260815-001" — shop-day based; mutations serialize so count + 1 never collides. */
+/** Next display code "20260815-001" — shop-day based. Reading the day's
+ * indexed range makes concurrent checkouts conflict and retry in Convex. Use
+ * the highest sequence rather than the row count so gaps cannot reuse a code. */
 async function nextSaleCode(ctx: MutationCtx, now: number): Promise<string> {
   const shop = await getShop(ctx);
   const prefix = `${dayString(now, shop.timezone).replace(/-/g, "")}-`;
-  const count = (
-    await ctx.db
-      .query("sales")
-      .withIndex("by_code", (q) => q.gte("code", prefix).lt("code", `${prefix}￿`))
-      .collect()
-  ).length;
-  return `${prefix}${String(count + 1).padStart(3, "0")}`;
+  const sales = await ctx.db
+    .query("sales")
+    .withIndex("by_code", (q) => q.gte("code", prefix).lt("code", `${prefix}￿`))
+    .collect();
+  let highestSequence = 0;
+  for (const sale of sales) {
+    const suffix = sale.code.slice(prefix.length);
+    if (/^\d+$/.test(suffix)) {
+      highestSequence = Math.max(highestSequence, Number(suffix));
+    }
+  }
+  return `${prefix}${String(highestSequence + 1).padStart(3, "0")}`;
 }
 
 /** One line's money value: the pieces that actually went out (ordered −
@@ -790,6 +797,21 @@ type SaleListFilters = {
   paymentStatus?: "paid" | "partly_paid" | "unpaid";
 };
 
+/** A cashier can type just the daily sequence ("1", "001", "002") instead
+ * of the full date-prefixed invoice code. Longer terms keep the existing
+ * full-code prefix behavior. */
+function isInvoiceSequenceSearch(term: string): boolean {
+  return /^\d{1,3}$/.test(term);
+}
+
+function saleCodeMatches(code: string, term: string): boolean {
+  if (!term) return true;
+  if (isInvoiceSequenceSearch(term)) {
+    return code.endsWith(`-${term.padStart(3, "0")}`);
+  }
+  return code.toLowerCase().startsWith(term);
+}
+
 /** Derived payment state of a row: paid when nothing is left, unpaid when
  * nothing was paid, partly_paid in between. Cancelled and draft rows are
  * excluded before this runs (see filteredRows) — cancelled would otherwise
@@ -808,7 +830,7 @@ function paymentStateOf(
  * recent of each status via by_status_createdAt, money per order via
  * toListRow (indexed by_sale reads), filtered in memory. No index can
  * express payment status, so the window is the tradeoff — same as listUnpaid.
- * Filter order: date range → customer → status → channel → code prefix →
+ * Filter order: date range → customer → status → channel → invoice code →
  * payment state. Drafts are unfinished orders and never appear as paid /
  * unpaid rows, so a payment filter excludes them (cancelled rows keep
  * remaining = 0 and stay, whichever state they compute to).
@@ -821,10 +843,16 @@ async function filteredRows(
   const shop = await getShop(ctx);
   // [fromMs, toMs) in the shop timezone: fromDay = start of that day, toDay
   // = end of that day (exclusive). Partial ranges allowed — one side only.
+  const selectedDay =
+    args.day !== undefined ? dayRange(args.day, shop.timezone) : null;
   const fromMs =
-    args.fromDay !== undefined ? dayRange(args.fromDay, shop.timezone).from : null;
+    args.fromDay !== undefined
+      ? dayRange(args.fromDay, shop.timezone).from
+      : selectedDay?.from ?? null;
   const toMs =
-    args.toDay !== undefined ? dayRange(args.toDay, shop.timezone).to : null;
+    args.toDay !== undefined
+      ? dayRange(args.toDay, shop.timezone).to
+      : selectedDay?.to ?? null;
   const batches = await Promise.all(
     ALL_SALE_STATUSES.map((status) =>
       ctx.db
@@ -842,7 +870,7 @@ async function filteredRows(
     if (args.customerId !== undefined && sale.customerId !== args.customerId) continue;
     if (args.status !== undefined && sale.status !== args.status) continue;
     if (args.channelId !== undefined && sale.salesChannelId !== args.channelId) continue;
-    if (term && !sale.code.toLowerCase().startsWith(term)) continue;
+    if (!saleCodeMatches(sale.code, term)) continue;
     // Drafts are unfinished orders and cancelled rows show no payment badge
     // ("—") — neither belongs in a paid/unpaid view.
     if (
@@ -863,8 +891,9 @@ async function filteredRows(
   return rows;
 }
 
-// T12 — the sales list. Filters are index-driven: order-code prefix search,
-// a status, a sales page (channel), or a shop day (status+day compose).
+// T12 — the sales list. Filters are index-driven: full order-code prefix
+// search, a status, a sales page (channel), or a shop day (status+day compose).
+// Short invoice-sequence search uses the bounded indexed scan above.
 // Money is computed per page row — pages are ≤100 and every read is an
 // indexed by_sale lookup, so this stays cheap. An empty continueCursor
 // signals "no more pages" to the client. Customer / date-range / payment
@@ -901,7 +930,8 @@ export const list = query({
       args.customerId !== undefined ||
       args.fromDay !== undefined ||
       args.toDay !== undefined ||
-      args.paymentStatus !== undefined;
+      args.paymentStatus !== undefined ||
+      isInvoiceSequenceSearch(args.search?.trim() ?? "");
     if (hasExtraFilters) {
       const rows = await filteredRows(ctx, args);
       const offset = args.paginationOpts.cursor
@@ -1040,7 +1070,8 @@ export const summary = query({
       args.customerId !== undefined ||
       args.fromDay !== undefined ||
       args.toDay !== undefined ||
-      args.paymentStatus !== undefined;
+      args.paymentStatus !== undefined ||
+      isInvoiceSequenceSearch(args.search?.trim() ?? "");
     if (hasExtraFilters) {
       // Same bounded window + filters as list — the cards match the list.
       const rows = await filteredRows(ctx, args);

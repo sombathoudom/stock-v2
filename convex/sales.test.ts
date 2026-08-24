@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
+import { dayString } from "./helpers";
 import schema from "./schema";
 
 const AUTH_USER_ID = "test-auth-user";
@@ -166,6 +167,66 @@ const billed = (item: {
   qtyCancelled: number;
   qtyReturned: number;
 }) => item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
+
+describe("sales.checkout", () => {
+  test("uses the highest daily invoice sequence when earlier numbers have gaps", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const now = Date.now();
+    const prefix = `${dayString(now, "Asia/Phnom_Penh").replace(/-/g, "")}-`;
+
+    await t.run(async (ctx) => {
+      for (const sequence of [1, 3]) {
+        await ctx.db.insert("sales", {
+          code: `${prefix}${String(sequence).padStart(3, "0")}`,
+          customerId: ids.customerId,
+          salesChannelId: ids.channelId,
+          status: "confirmed",
+          deliveryFee: 0,
+          deliveryCost: 0,
+          discount: 0,
+          userId: ids.userId,
+          createdAt: now,
+        });
+      }
+    });
+
+    const created = await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    expect(created.sale.code).toBe(`${prefix}004`);
+
+    const codes = await t.run(async (ctx) =>
+      (
+        await ctx.db
+          .query("sales")
+          .withIndex("by_code", (q) => q.gte("code", prefix).lt("code", `${prefix}￿`))
+          .collect()
+      ).map((sale) => sale.code)
+    );
+    expect(new Set(codes).size).toBe(codes.length);
+  });
+
+  test("finds an invoice by only its short daily sequence", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    await createSale(t, ids, [{ variantId: ids.variantM, qty: 1 }]);
+    const second = await createSale(t, ids, [{ variantId: ids.variantL, qty: 1 }]);
+
+    const result = await t.query(api.sales.list, {
+      paginationOpts: { numItems: 20, cursor: null },
+      search: "002",
+    });
+    expect(result.page.map((row) => row.sale._id)).toEqual([second.sale._id]);
+
+    const unpadded = await t.query(api.sales.list, {
+      paginationOpts: { numItems: 20, cursor: null },
+      search: "2",
+    });
+    expect(unpadded.page.map((row) => row.sale._id)).toEqual([second.sale._id]);
+
+    const summary = await t.query(api.sales.summary, { search: "002" });
+    expect(summary.count).toBe(1);
+  });
+});
 
 describe("sales.saveEdit", () => {
   test("adds a new line and deducts its stock", async () => {
