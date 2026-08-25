@@ -24,11 +24,15 @@ interface USB {
 interface USBDevice {
   readonly vendorId: number;
   readonly productId: number;
+  /** The configuration currently selected by the OS (undefined before open). */
   readonly configuration: USBConfiguration | undefined;
+  /** Every configuration the device exposes — printers may not use #1. */
+  readonly configurations: USBConfiguration[];
   open(): Promise<void>;
   close(): Promise<void>;
   selectConfiguration(configurationValue: number): Promise<void>;
   claimInterface(interfaceNumber: number): Promise<void>;
+  releaseInterface(interfaceNumber: number): Promise<void>;
   transferOut(
     endpointNumber: number,
     // Looser than the spec's BufferSource: TS 5.9's generic typed arrays
@@ -38,10 +42,14 @@ interface USBDevice {
 }
 
 interface USBConfiguration {
+  /** The bConfigurationValue passed back to selectConfiguration(). */
+  readonly configurationValue: number;
   interfaces: USBInterface[];
 }
 
 interface USBInterface {
+  /** The bInterfaceNumber passed to claim/releaseInterface(). */
+  readonly interfaceNumber: number;
   alternate: USBAlternateInterface;
 }
 
@@ -105,6 +113,16 @@ declare module "esc-pos-encoder" {
       errorLevel?: "l" | "m" | "q" | "h"
     ): this;
     barcode(data: string, type: BarcodeType, settings?: BarcodeSettings): this;
+    /**
+     * Print a bitmap. `image` is canvas ImageData (RGBA); a pixel prints
+     * black when its red channel is 0. mode "raster" emits GS v 0.
+     */
+    image(
+      image: ImageData,
+      width: number,
+      height: number,
+      mode?: "column" | "raster"
+    ): this;
     /** Full or partial paper cut. */
     cut(partial?: boolean): this;
     raw(data: number[]): this;
