@@ -1,0 +1,7 @@
+# DolyOutfits POS — private business application
+# All authenticated routes are behind login; block all crawlers.
+
+User-agent: *
+Disallow: /
+
+Sitemap: https://0676-36-37-204-107.ngrok-free.app/sitemap.xml

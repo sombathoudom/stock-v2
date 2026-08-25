@@ -4,13 +4,17 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import {
   Cancel01Icon,
   Download01Icon,
+  EllipsisVerticalIcon,
+  Key01Icon,
+  PlusSignIcon,
   PrinterIcon,
   Settings01Icon,
   UsbConnected01Icon,
+  UserBlock01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useConvex, useMutation, useQuery } from "convex/react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { FormProvider, useForm } from "react-hook-form";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -38,6 +42,20 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -245,6 +263,309 @@ function RoleSelect({
   );
 }
 
+/** Per-row management menu: reset password / deactivate–reactivate. Every
+ * action is owner-only on the server; self-actions are refused there too
+ * (the disabled state here is just UX). */
+function UserRowActions({
+  target,
+  selfId,
+  onResetPassword,
+  onToggleActive,
+}: {
+  target: Doc<"users">;
+  selfId?: Id<"users">;
+  onResetPassword: (target: Doc<"users">) => void;
+  onToggleActive: (target: Doc<"users">) => void;
+}) {
+  const isSelf = target._id === selfId;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-11 sm:size-8"
+            aria-label={t().common.actions}
+            disabled={isSelf}
+          />
+        }
+      >
+        <HugeiconsIcon icon={EllipsisVerticalIcon} strokeWidth={2} className="size-5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" sideOffset={4} className="w-56">
+        {target.active ? (
+          <>
+            <DropdownMenuItem
+              className="min-h-11 sm:min-h-8"
+              onClick={() => onResetPassword(target)}
+            >
+              <HugeiconsIcon icon={Key01Icon} strokeWidth={2} className="size-4" />
+              {t().settings.resetPassword}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="min-h-11 sm:min-h-8 text-destructive data-highlighted:text-destructive"
+              onClick={() => onToggleActive(target)}
+            >
+              <HugeiconsIcon
+                icon={UserBlock01Icon}
+                strokeWidth={2}
+                className="size-4"
+              />
+              {t().settings.deactivateConfirm}
+            </DropdownMenuItem>
+          </>
+        ) : (
+          <DropdownMenuItem
+            className="min-h-11 sm:min-h-8"
+            onClick={() => onToggleActive(target)}
+          >
+            <HugeiconsIcon icon={Key01Icon} strokeWidth={2} className="size-4" />
+            {t().settings.activateConfirm}
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+const resetPasswordSchema = z
+  .object({
+    newPassword: z.string().trim().min(8).max(128),
+    confirmPassword: z.string().trim(),
+  })
+  .refine((values) => values.newPassword === values.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords do not match",
+  });
+
+type ResetPasswordValues = z.infer<typeof resetPasswordSchema>;
+
+const addStaffSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  email: z.string().trim().email(),
+  password: z.string().trim().min(8).max(128),
+  role: z.enum(["owner", "staff"]),
+});
+
+type AddStaffValues = z.infer<typeof addStaffSchema>;
+
+/** Owner invites a staff member: creates the sign-in + staff record in one
+ * step, with the role chosen up front. */
+function AddStaffDialog({ onClose }: { onClose: () => void }) {
+  const createStaff = useMutation(api.users.createStaff);
+  const [saving, setSaving] = useState(false);
+  const form = useForm<AddStaffValues>({
+    resolver: zodResolver(addStaffSchema),
+    defaultValues: { name: "", email: "", password: "", role: "staff" },
+  });
+
+  async function onSubmit(values: AddStaffValues) {
+    setSaving(true);
+    try {
+      const created = await createStaff(values);
+      toast.success(
+        t().settings.staffCreated.replace("{name}", created.name),
+      );
+      onClose();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t().settings.addStaff}</DialogTitle>
+          <DialogDescription>{t().settings.addStaffHint}</DialogDescription>
+        </DialogHeader>
+        <FormProvider {...form}>
+          <form
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex flex-col gap-3"
+            noValidate
+          >
+            <FormInput
+              name="name"
+              label={t().settings.staffName}
+              required
+              autoComplete="off"
+            />
+            <FormInput
+              name="email"
+              label={t().settings.staffEmail}
+              type="email"
+              required
+              autoComplete="off"
+            />
+            <FormInput
+              name="password"
+              label={t().settings.startPassword}
+              type="password"
+              hint={t().settings.resetPasswordHint}
+              required
+              autoComplete="new-password"
+            />
+            <FormSelect
+              name="role"
+              label={t().common.role}
+              options={[
+                { value: "staff", label: t().common.roleStaff },
+                { value: "owner", label: t().common.roleOwner },
+              ]}
+              required
+            />
+            <DialogFooter className="gap-2">
+              <Button type="button" variant="destructive" onClick={onClose}>
+                <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
+                {t().common.cancel}
+              </Button>
+              <Button type="submit" disabled={saving}>
+                {t().common.add}
+              </Button>
+            </DialogFooter>
+          </form>
+        </FormProvider>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Owner sets a staff member's new password (they forgot theirs). The
+ * server hashes through Better Auth and updates its credential account. */
+function ResetPasswordDialog({
+  target,
+  onClose,
+}: {
+  target: Doc<"users">;
+  onClose: () => void;
+}) {
+  const resetPassword = useMutation(api.users.resetPassword);
+  const [saving, setSaving] = useState(false);
+  const form = useForm<ResetPasswordValues>({
+    resolver: zodResolver(resetPasswordSchema),
+    defaultValues: { newPassword: "", confirmPassword: "" },
+  });
+
+  async function onSubmit(values: ResetPasswordValues) {
+    setSaving(true);
+    try {
+      await resetPassword({ userId: target._id, newPassword: values.newPassword });
+      toast.success(
+        t().settings.resetPasswordDone.replace("{name}", target.name),
+      );
+      onClose();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t().settings.resetPassword}</DialogTitle>
+          <DialogDescription>
+            {target.name} · {t().settings.resetPasswordHint}
+          </DialogDescription>
+        </DialogHeader>
+        <FormProvider {...form}>
+          <form
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex flex-col gap-3"
+            noValidate
+          >
+            <FormInput
+              name="newPassword"
+              label={t().settings.newPassword}
+              type="password"
+              required
+              autoComplete="new-password"
+            />
+            <FormInput
+              name="confirmPassword"
+              label={t().settings.confirmPassword}
+              type="password"
+              required
+              autoComplete="new-password"
+            />
+            <DialogFooter className="gap-2">
+              <Button type="button" variant="destructive" onClick={onClose}>
+                <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
+                {t().common.cancel}
+              </Button>
+              <Button type="submit" disabled={saving}>
+                {t().common.save}
+              </Button>
+            </DialogFooter>
+          </form>
+        </FormProvider>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Deactivation confirm — goods/history language, never "delete". */
+function DeactivateDialog({
+  target,
+  onClose,
+}: {
+  target: Doc<"users">;
+  onClose: () => void;
+}) {
+  const setActive = useMutation(api.users.setActive);
+  const [saving, setSaving] = useState(false);
+
+  async function confirm() {
+    setSaving(true);
+    try {
+      await setActive({ userId: target._id, active: false });
+      onClose();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t().settings.deactivateTitle}</DialogTitle>
+          <DialogDescription>
+            {target.name} — {t().settings.deactivateBody}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
+            {t().common.cancel}
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={() => void confirm()}
+            disabled={saving}
+          >
+            <HugeiconsIcon
+              icon={UserBlock01Icon}
+              strokeWidth={2}
+              className="size-4"
+            />
+            {t().settings.deactivateConfirm}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function LoadingPage() {
   return (
     <div className="flex w-full flex-col gap-6 p-4">
@@ -336,17 +657,48 @@ export default function SettingsPage() {
       : "skip",
   );
 
+  // Team management (owner-only): add staff, reset password, deactivate.
+  const setActive = useMutation(api.users.setActive);
+  const [resetTarget, setResetTarget] = useState<Doc<"users"> | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<Doc<"users"> | null>(null);
+  const [addStaffOpen, setAddStaffOpen] = useState(false);
+
+  // Reactivation is safe — one tap, no confirm.
+  const activate = useCallback(
+    async (target: Doc<"users">) => {
+      try {
+        await setActive({ userId: target._id, active: true });
+      } catch (err) {
+        toastError(err);
+      }
+    },
+    [setActive],
+  );
+
   const columns = useMemo<DataTableColumn<Doc<"users">>[]>(
     () => [
       {
         accessorKey: "name",
         header: t().common.name,
-        cell: ({ row }) => row.original.name,
+        cell: ({ row }) => (
+          <span className={row.original.active ? "" : "text-muted-foreground line-through"}>
+            {row.original.name}
+          </span>
+        ),
       },
       {
         accessorKey: "email",
         header: t().common.email,
         cell: ({ row }) => row.original.email,
+      },
+      {
+        accessorKey: "active",
+        header: t().common.active,
+        cell: ({ row }) => (
+          <Badge variant={row.original.active ? "success" : "secondary"}>
+            {row.original.active ? t().settings.userActive : t().settings.userInactive}
+          </Badge>
+        ),
       },
       {
         accessorKey: "role",
@@ -364,12 +716,26 @@ export default function SettingsPage() {
           <RoleSelect
             userId={row.original._id}
             role={row.original.role}
-            disabled={row.original._id === user?._id}
+            disabled={row.original._id === user?._id || !row.original.active}
+          />
+        ),
+      },
+      {
+        id: "userActions",
+        header: t().common.actions,
+        cell: ({ row }) => (
+          <UserRowActions
+            target={row.original}
+            selfId={user?._id}
+            onResetPassword={setResetTarget}
+            onToggleActive={(target) =>
+              target.active ? setDeactivateTarget(target) : void activate(target)
+            }
           />
         ),
       },
     ],
-    [user?._id],
+    [user?._id, activate],
   );
 
   const [saving, setSaving] = useState(false);
@@ -688,9 +1054,17 @@ export default function SettingsPage() {
       </FormProvider>
 
       <Card>
-        <CardHeader>
-          <CardTitle>{t().settings.usersTitle}</CardTitle>
-          <CardDescription>{t().settings.usersHint}</CardDescription>
+        <CardHeader className="gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <CardTitle>{t().settings.usersTitle}</CardTitle>
+              <CardDescription>{t().settings.usersHint}</CardDescription>
+            </div>
+            <Button type="button" onClick={() => setAddStaffOpen(true)}>
+              <HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} className="size-4" />
+              {t().settings.addStaff}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           <DataTable
@@ -719,14 +1093,37 @@ export default function SettingsPage() {
             cardRender={(u) => (
               <Card>
                 <CardHeader>
-                  <CardTitle>{u.name}</CardTitle>
+                  <CardTitle className={u.active ? "" : "text-muted-foreground line-through"}>
+                    {u.name}
+                  </CardTitle>
                   <CardDescription>{u.email}</CardDescription>
                 </CardHeader>
-                <CardContent className="flex-row items-center justify-between">
-                  <Badge variant={u.role === "owner" ? "default" : "secondary"}>
-                    {u.role === "owner" ? t().common.roleOwner : t().common.roleStaff}
-                  </Badge>
-                  <RoleSelect userId={u._id} role={u.role} disabled={u._id === user._id} />
+                <CardContent className="flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge variant={u.active ? "success" : "secondary"}>
+                      {u.active ? t().settings.userActive : t().settings.userInactive}
+                    </Badge>
+                    <Badge variant={u.role === "owner" ? "default" : "secondary"}>
+                      {u.role === "owner" ? t().common.roleOwner : t().common.roleStaff}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <RoleSelect
+                      userId={u._id}
+                      role={u.role}
+                      disabled={u._id === user._id || !u.active}
+                    />
+                    <UserRowActions
+                      target={u}
+                      selfId={user._id}
+                      onResetPassword={setResetTarget}
+                      onToggleActive={(target) =>
+                        target.active
+                          ? setDeactivateTarget(target)
+                          : void activate(target)
+                      }
+                    />
+                  </div>
                 </CardContent>
               </Card>
             )}
@@ -746,6 +1143,17 @@ export default function SettingsPage() {
           </Button>
         </CardContent>
       </Card>
+
+      {resetTarget ? (
+        <ResetPasswordDialog target={resetTarget} onClose={() => setResetTarget(null)} />
+      ) : null}
+      {deactivateTarget ? (
+        <DeactivateDialog
+          target={deactivateTarget}
+          onClose={() => setDeactivateTarget(null)}
+        />
+      ) : null}
+      {addStaffOpen ? <AddStaffDialog onClose={() => setAddStaffOpen(false)} /> : null}
     </div>
   );
 }

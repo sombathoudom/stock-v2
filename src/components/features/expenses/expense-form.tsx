@@ -1,7 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Cancel01Icon } from "@hugeicons/core-free-icons";
+import { Cancel01Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useMutation, useQuery } from "convex/react";
 import { useState } from "react";
@@ -24,12 +24,22 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { inputToCents, t, toastError } from "@/lib/utils";
 
 // One shared form for the create and edit expense pages. The server
 // re-validates everything (convex/expenses.ts) — this is UX validation.
-// Category is free text with past categories as suggestions (creatable
-// combobox), so the owner's category list grows itself.
+// Categories are selected from managed records; the quick-add dialog creates
+// one explicitly instead of silently accepting spelling variants.
 
 const expenseSchema = z.object({
   amount: moneyInputSchema,
@@ -58,7 +68,8 @@ export function ExpenseForm({
 }) {
   const create = useMutation(api.expenses.create);
   const update = useMutation(api.expenses.update);
-  const categories = useQuery(api.expenses.listCategories);
+  const historicalCategories = useQuery(api.expenses.listCategories);
+  const managedCategories = useQuery(api.expenseCategories.listActive);
   const [saving, setSaving] = useState(false);
 
   // Lazy initializer — Date.now() is impure, and lazy state initializers are
@@ -74,6 +85,18 @@ export function ExpenseForm({
       note: expense?.note ?? "",
     },
   });
+
+  const categoryOptions = new Map<string, string>();
+  for (const category of managedCategories ?? []) {
+    categoryOptions.set(category.nameLower, category.name);
+  }
+  for (const category of historicalCategories ?? []) {
+    const key = category.toLowerCase();
+    if (!categoryOptions.has(key)) categoryOptions.set(key, category);
+  }
+  if (expense && !categoryOptions.has(expense.categoryLower)) {
+    categoryOptions.set(expense.categoryLower, expense.category);
+  }
 
   async function onSubmit(values: ExpenseValues) {
     setSaving(true);
@@ -127,18 +150,26 @@ export function ExpenseForm({
               required
               hint={t().expenses.dateHint}
             />
-            <FormCombobox
-              name="category"
-              label={t().expenses.category}
-              required
-              creatable
-              options={(categories ?? []).map((category) => ({
-                value: category,
-                label: category,
-              }))}
-              hint={t().expenses.categoryHint}
-              className="sm:col-span-2"
-            />
+            <div className="sm:col-span-2">
+              <FormCombobox
+                name="category"
+                label={t().expenses.category}
+                required
+                options={[...categoryOptions.values()].map((category) => ({
+                  value: category,
+                  label: category,
+                }))}
+                hint={t().expenses.categoryHint}
+              />
+              <QuickAddExpenseCategory
+                onCreated={(category) => {
+                  form.setValue("category", category, {
+                    shouldDirty: true,
+                    shouldValidate: true,
+                  });
+                }}
+              />
+            </div>
             <FormTextarea
               name="note"
               label={t().common.note}
@@ -161,5 +192,76 @@ export function ExpenseForm({
         </Card>
       </form>
     </FormProvider>
+  );
+}
+
+function QuickAddExpenseCategory({ onCreated }: { onCreated: (name: string) => void }) {
+  const createCategory = useMutation(api.expenseCategories.create);
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    try {
+      const category = await createCategory({ name });
+      onCreated(category.name);
+      setName("");
+      setOpen(false);
+      toast.success(t().expenses.categoryCreated);
+    } catch (error) {
+      toastError(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="mt-2 h-11 w-full sm:h-9 sm:w-auto"
+        onClick={() => setOpen(true)}
+      >
+        <HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} className="size-4" />
+        {t().expenses.newCategory}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t().expenses.newCategory}</DialogTitle>
+            <DialogDescription>{t().expenses.newCategoryHint}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="new-expense-category">{t().expenses.category}</Label>
+            <Input
+              id="new-expense-category"
+              value={name}
+              maxLength={100}
+              autoFocus
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void save();
+                }
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" disabled={!name.trim() || saving} onClick={() => void save()}>
+              {t().common.save}
+            </Button>
+            <Button type="button" variant="destructive" onClick={() => setOpen(false)}>
+              <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
+              {t().common.cancel}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

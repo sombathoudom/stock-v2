@@ -244,6 +244,7 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_status_createdAt", ["status", "createdAt"])
     .index("by_customer", ["customerId"])
+    .index("by_customer_createdAt", ["customerId", "createdAt"])
     .index("by_channel", ["salesChannelId"])
     .index("by_company", ["deliveryCompanyId"])
     .index("by_user", ["userId"])
@@ -289,6 +290,12 @@ export default defineSchema({
   })
     .index("by_receivedDay", ["receivedDay"])
     .index("by_sale", ["saleId"]),
+
+  expenseCategories: defineTable({
+    name: v.string(),
+    nameLower: v.string(),
+    active: v.boolean(),
+  }).index("by_nameLower", ["nameLower"]),
 
   expenses: defineTable({
     amount: v.number(), // integer cents

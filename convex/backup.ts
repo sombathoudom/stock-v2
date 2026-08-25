@@ -31,6 +31,7 @@ const TABLES = [
   "sales",
   "saleItems",
   "payments",
+  "expenseCategories",
   "expenses",
   "saleEvents",
 ] as const;

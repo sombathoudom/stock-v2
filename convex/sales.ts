@@ -71,9 +71,10 @@ export async function assertStockCovers(
 /**
  * Moving weighted-average cost at sale time (rule #3), derived without a
  * stored counter. Replay shelf quantity in ledger order; stock movements keep
- * the current average, while each receipt blends its purchase-item cost with
- * only the stock still on the shelf. Falls back to the reference cost when a
- * malformed history does not provide enough purchase cost information.
+ * the current average, while each receipt blends its purchase-item cost plus
+ * its equal per-piece share of purchase delivery with only the stock still on
+ * the shelf. Falls back to the reference cost when malformed history does not
+ * provide enough purchase cost information.
  */
 export async function weightedAvgCost(
   ctx: { db: QueryCtx["db"] },
@@ -102,6 +103,31 @@ export async function weightedAvgCost(
   const itemById = new Map(
     items.filter((item) => item !== null).map((item) => [item._id, item] as const)
   );
+  const purchaseIds = [
+    ...new Set(
+      items
+        .filter((item) => item !== null)
+        .map((item) => item.purchaseId)
+    ),
+  ];
+  const purchaseCosts = await Promise.all(
+    purchaseIds.map(async (purchaseId) => {
+      const [purchase, purchaseItems] = await Promise.all([
+        ctx.db.get(purchaseId),
+        ctx.db
+          .query("purchaseItems")
+          .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
+          .collect(),
+      ]);
+      const totalPieces = purchaseItems.reduce((total, item) => total + item.qty, 0);
+      const deliveryPerPiece =
+        purchase && totalPieces > 0
+          ? Math.round((purchase.deliveryCost ?? 0) / totalPieces)
+          : 0;
+      return [purchaseId, deliveryPerPiece] as const;
+    })
+  );
+  const deliveryPerPieceByPurchase = new Map(purchaseCosts);
   const fallbackCost = variant.cost ?? product.defaultCost;
   let currentQty = 0;
   let currentAverage: number | undefined;
@@ -109,12 +135,14 @@ export async function weightedAvgCost(
     if (row.reason === "purchase" && row.delta > 0 && row.purchaseItemId !== undefined) {
       const item = itemById.get(row.purchaseItemId);
       if (item?.variantId === variantId) {
+        const receiptUnitCost =
+          item.unitCost + (deliveryPerPieceByPurchase.get(item.purchaseId) ?? 0);
         if (currentQty <= 0) {
-          currentAverage = item.unitCost;
+          currentAverage = receiptUnitCost;
         } else {
           const shelfCost = currentAverage ?? fallbackCost;
           currentAverage = Math.round(
-            (currentQty * shelfCost + row.delta * item.unitCost) /
+            (currentQty * shelfCost + row.delta * receiptUnitCost) /
               (currentQty + row.delta)
           );
         }
@@ -1258,7 +1286,7 @@ export const listOwedByCustomer = query({
     const SCAN = 200;
     const sales = await ctx.db
       .query("sales")
-      .withIndex("by_customer", (q) => q.eq("customerId", args.customerId))
+      .withIndex("by_customer_createdAt", (q) => q.eq("customerId", args.customerId))
       .order("desc")
       .take(SCAN);
     const rows = [];

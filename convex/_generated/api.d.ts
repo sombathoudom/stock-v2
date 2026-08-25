@@ -10,6 +10,7 @@
 
 import type * as adjustments from "../adjustments.js";
 import type * as auth from "../auth.js";
+import type * as auth_credentials from "../auth_credentials.js";
 import type * as backup from "../backup.js";
 import type * as categories from "../categories.js";
 import type * as channels from "../channels.js";
@@ -17,6 +18,7 @@ import type * as customers from "../customers.js";
 import type * as dashboard from "../dashboard.js";
 import type * as delivery from "../delivery.js";
 import type * as deliveryCompanies from "../deliveryCompanies.js";
+import type * as expenseCategories from "../expenseCategories.js";
 import type * as expenses from "../expenses.js";
 import type * as helpers from "../helpers.js";
 import type * as http from "../http.js";
@@ -44,6 +46,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   adjustments: typeof adjustments;
   auth: typeof auth;
+  auth_credentials: typeof auth_credentials;
   backup: typeof backup;
   categories: typeof categories;
   channels: typeof channels;
@@ -51,6 +54,7 @@ declare const fullApi: ApiFromModules<{
   dashboard: typeof dashboard;
   delivery: typeof delivery;
   deliveryCompanies: typeof deliveryCompanies;
+  expenseCategories: typeof expenseCategories;
   expenses: typeof expenses;
   helpers: typeof helpers;
   http: typeof http;

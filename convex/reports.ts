@@ -4,12 +4,27 @@ import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import { query } from "./_generated/server";
-import { getShop, requireUser, startOfDay } from "./helpers";
-import { dayRange, variantLabel } from "./sales";
+import { dayString, getShop, requireUser, startOfDay } from "./helpers";
+import {
+  chargedDeliveryFee,
+  computePaid,
+  computeTotal,
+  dayRange,
+  variantLabel,
+  weightedAvgCost,
+} from "./sales";
+import { variantQty } from "./stock";
 import {
   channelReportRow,
+  customerDebtReport,
+  deadStockReport,
+  deadStockThreshold,
+  inventoryValueReport,
   ledgerReason,
   plReport,
+  productPerformanceReport,
+  reorderDays,
+  reorderPlanningReport,
   purchaseTraceItem,
   reportCsvRow,
   stockMovementRow,
@@ -32,6 +47,33 @@ import {
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_RE = /^\d{4}-\d{2}$/;
 const YEAR_RE = /^\d{4}$/;
+
+type DebtAging = {
+  days0To7: number;
+  days8To30: number;
+  days31To60: number;
+  over60Days: number;
+};
+
+function emptyDebtAging(): DebtAging {
+  return { days0To7: 0, days8To30: 0, days31To60: 0, over60Days: 0 };
+}
+
+function addDebtToAging(aging: DebtAging, ageDays: number, amount: number) {
+  if (ageDays <= 7) aging.days0To7 += amount;
+  else if (ageDays <= 30) aging.days8To30 += amount;
+  else if (ageDays <= 60) aging.days31To60 += amount;
+  else aging.over60Days += amount;
+}
+
+function calendarDayOrdinal(day: string): number {
+  const [year, month, date] = day.split("-").map(Number);
+  return Math.floor(Date.UTC(year, month - 1, date) / 86_400_000);
+}
+
+function dayFromOrdinal(ordinal: number): string {
+  return new Date(ordinal * 86_400_000).toISOString().slice(0, 10);
+}
 
 /** [from, to) day-string range for a period value (to is exclusive). */
 function periodRange(
@@ -73,6 +115,14 @@ async function orderCosts(
     .collect();
   let total = 0;
   let itemCost = 0;
+  if (sale.status === "cancelled") {
+    return {
+      total: chargedDeliveryFee(sale),
+      itemCost: 0,
+      deliveryFee: chargedDeliveryFee(sale),
+      deliveryCost: sale.deliveryCost,
+    };
+  }
   for (const item of items) {
     const qty = item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
     total += item.unitPrice * qty - (item.discount ?? 0);
@@ -84,6 +134,114 @@ async function orderCosts(
     deliveryFee: sale.deliveryFee,
     deliveryCost: sale.deliveryCost,
   };
+}
+
+/** Split an integer total proportionally while preserving every cent. */
+function allocateProportionally(total: number, weights: number[]): number[] {
+  const weightTotal = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
+  if (total === 0 || weightTotal <= 0) return weights.map(() => 0);
+  const sign = total < 0 ? -1 : 1;
+  const absolute = Math.abs(total);
+  const allocations = weights.map((weight) =>
+    Math.floor((absolute * Math.max(0, weight)) / weightTotal)
+  );
+  const remaining = absolute - allocations.reduce((sum, value) => sum + value, 0);
+  const order = weights
+    .map((weight, index) => ({
+      index,
+      remainder: (absolute * Math.max(0, weight)) % weightTotal,
+    }))
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+  for (let i = 0; i < remaining; i++) allocations[order[i].index] += 1;
+  return allocations.map((value) => value * sign);
+}
+
+type VariantPaymentAllocation = {
+  variantId: Id<"productVariants">;
+  revenue: number;
+  landedCost: number;
+};
+
+/** Cash-basis payment allocation down to variant lines. */
+async function loadPaymentVariantAllocations(
+  ctx: { db: QueryCtx["db"] },
+  matchedPayments: Doc<"payments">[]
+): Promise<Map<string, VariantPaymentAllocation[]>> {
+  const saleIds = [...new Set(matchedPayments.map((payment) => payment.saleId))];
+  const byPayment = new Map<string, VariantPaymentAllocation[]>();
+  await Promise.all(
+    saleIds.map(async (saleId) => {
+      const [sale, payments, items] = await Promise.all([
+        ctx.db.get(saleId),
+        ctx.db
+          .query("payments")
+          .withIndex("by_sale", (q) => q.eq("saleId", saleId))
+          .collect(),
+        ctx.db
+          .query("saleItems")
+          .withIndex("by_sale", (q) => q.eq("saleId", saleId))
+          .collect(),
+      ]);
+      if (!sale || sale.status === "cancelled") return;
+      const lines = items
+        .map((item) => {
+          const qty = item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
+          return {
+            item,
+            gross: Math.max(0, item.unitPrice * qty - (item.discount ?? 0)),
+            cost: Math.max(0, item.unitCostSnapshot * qty),
+          };
+        })
+        .filter((line) => line.gross > 0 || line.cost > 0)
+        .sort((a, b) => a.item._id.localeCompare(b.item._id));
+      if (lines.length === 0) return;
+      const grossWeights = lines.map((line) => line.gross);
+      const grossTotal = grossWeights.reduce((sum, value) => sum + value, 0);
+      const discount = Math.min(Math.max(sale.discount, 0), grossTotal);
+      const discountShares = allocateProportionally(discount, grossWeights);
+      const revenueWeights = lines.map((line, index) => line.gross - discountShares[index]);
+      const merchandiseTotal = revenueWeights.reduce((sum, value) => sum + value, 0);
+      const costWeights = lines.map((line) => line.cost);
+      const costTotal = costWeights.reduce((sum, value) => sum + value, 0);
+      const orderTotal = merchandiseTotal + sale.deliveryFee;
+      if (orderTotal <= 0) return;
+
+      payments.sort(
+        (a, b) =>
+          a.receivedAt - b.receivedAt ||
+          a._creationTime - b._creationTime ||
+          a._id.localeCompare(b._id)
+      );
+      let cumulativePaid = 0;
+      let previousRevenue = lines.map(() => 0);
+      let previousCost = lines.map(() => 0);
+      for (const payment of payments) {
+        cumulativePaid += payment.amount;
+        const revenueTarget = Math.round(
+          (cumulativePaid / orderTotal) * merchandiseTotal
+        );
+        const costTarget = Math.round((cumulativePaid / orderTotal) * costTotal);
+        const currentRevenue = allocateProportionally(revenueTarget, revenueWeights);
+        const currentCost = allocateProportionally(costTarget, costWeights);
+        const byVariant = new Map<Id<"productVariants">, VariantPaymentAllocation>();
+        for (let index = 0; index < lines.length; index++) {
+          const variantId = lines[index].item.variantId;
+          const entry = byVariant.get(variantId) ?? {
+            variantId,
+            revenue: 0,
+            landedCost: 0,
+          };
+          entry.revenue += currentRevenue[index] - previousRevenue[index];
+          entry.landedCost += currentCost[index] - previousCost[index];
+          byVariant.set(variantId, entry);
+        }
+        byPayment.set(payment._id, [...byVariant.values()]);
+        previousRevenue = currentRevenue;
+        previousCost = currentCost;
+      }
+    })
+  );
+  return byPayment;
 }
 
 type PaymentAllocation = {
@@ -392,6 +550,661 @@ export const getChannelReport = query({
         profit: entry.profit,
       }))
       .sort((a, b) => b.revenue - a.revenue);
+  },
+});
+
+// Current customer balances grouped by customer. This is a balance report,
+// not cash-basis revenue: every payment ever recorded against an order is
+// netted, refunds reopen debt, and each order keeps its own non-negative
+// balance. No stored customer total exists that could drift.
+export const getCustomerDebtReport = query({
+  args: {
+    paginationOpts: paginationOptsValidator,
+    search: v.optional(v.string()),
+  },
+  returns: customerDebtReport,
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    const shop = await getShop(ctx);
+    const asOfDay = dayString(Date.now(), shop.timezone);
+    const asOfOrdinal = calendarDayOrdinal(asOfDay);
+    const sales = await ctx.db.query("sales").withIndex("by_createdAt").collect();
+    const owingOrders = (
+      await Promise.all(
+        sales
+          .filter((sale) => sale.status !== "draft")
+          .map(async (sale) => {
+            const [total, paid] = await Promise.all([
+              computeTotal(ctx, sale),
+              computePaid(ctx, sale._id),
+            ]);
+            const remaining = Math.max(0, total - paid);
+            if (remaining <= 0) return null;
+            const ageDays = Math.max(
+              0,
+              asOfOrdinal - calendarDayOrdinal(dayString(sale.createdAt, shop.timezone))
+            );
+            return { sale, remaining, ageDays };
+          })
+      )
+    ).filter((row) => row !== null);
+
+    const grouped = new Map<
+      Id<"customers">,
+      {
+        totalOwed: number;
+        unpaidOrderCount: number;
+        aging: DebtAging;
+        oldest: (typeof owingOrders)[number];
+      }
+    >();
+    for (const order of owingOrders) {
+      const existing = grouped.get(order.sale.customerId);
+      if (existing) {
+        existing.totalOwed += order.remaining;
+        existing.unpaidOrderCount += 1;
+        addDebtToAging(existing.aging, order.ageDays, order.remaining);
+        if (order.sale.createdAt < existing.oldest.sale.createdAt) {
+          existing.oldest = order;
+        }
+      } else {
+        const aging = emptyDebtAging();
+        addDebtToAging(aging, order.ageDays, order.remaining);
+        grouped.set(order.sale.customerId, {
+          totalOwed: order.remaining,
+          unpaidOrderCount: 1,
+          aging,
+          oldest: order,
+        });
+      }
+    }
+
+    const customers = await Promise.all(
+      [...grouped.keys()].map((customerId) => ctx.db.get(customerId))
+    );
+    const search = args.search?.trim().toLowerCase() ?? "";
+    const phoneSearch = search.replace(/[^0-9]/g, "").replace(/^0+/, "");
+    const rows = customers
+      .filter((customer) => customer !== null)
+      .map((customer) => {
+        const debt = grouped.get(customer._id)!;
+        return {
+          customerId: customer._id,
+          customerName: customer.name,
+          customerPhone: customer.phone,
+          totalOwed: debt.totalOwed,
+          unpaidOrderCount: debt.unpaidOrderCount,
+          aging: debt.aging,
+          oldestOrderId: debt.oldest.sale._id,
+          oldestOrderCode: debt.oldest.sale.code,
+          oldestOrderAt: debt.oldest.sale.createdAt,
+          oldestAgeDays: debt.oldest.ageDays,
+        };
+      })
+      .filter(
+        (row) =>
+          !search ||
+          row.customerName.toLowerCase().includes(search) ||
+          (phoneSearch.length > 0 && row.customerPhone.includes(phoneSearch))
+      )
+      .sort(
+        (a, b) =>
+          b.totalOwed - a.totalOwed ||
+          a.oldestOrderAt - b.oldestOrderAt ||
+          a.customerId.localeCompare(b.customerId)
+      );
+
+    const aging = emptyDebtAging();
+    let totalOwed = 0;
+    for (const row of rows) {
+      totalOwed += row.totalOwed;
+      aging.days0To7 += row.aging.days0To7;
+      aging.days8To30 += row.aging.days8To30;
+      aging.days31To60 += row.aging.days31To60;
+      aging.over60Days += row.aging.over60Days;
+    }
+    const requestedOffset = Number(args.paginationOpts.cursor ?? "0");
+    const offset =
+      Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+        ? requestedOffset
+        : 0;
+    const pageSize = Math.min(Math.max(Math.floor(args.paginationOpts.numItems), 1), 100);
+    const page = rows.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    return {
+      asOfDay,
+      totalOwed,
+      customerCount: rows.length,
+      aging,
+      page,
+      continueCursor: nextOffset < rows.length ? String(nextOffset) : "",
+      total: rows.length,
+    };
+  },
+});
+
+export const getProductPerformanceReport = query({
+  args: {
+    period: v.object({
+      type: v.union(v.literal("day"), v.literal("month"), v.literal("year")),
+      value: v.string(),
+    }),
+    search: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: productPerformanceReport,
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    const shop = await getShop(ctx);
+    const { from, to } = periodRange(args.period.type, args.period.value);
+    const fromMs = dayRange(from, shop.timezone).from;
+    const toMs = dayRange(to, shop.timezone).from;
+    const [movements, payments] = await Promise.all([
+      ctx.db
+        .query("stockLedger")
+        .withIndex("by_ts", (q) => q.gte("ts", fromMs).lt("ts", toMs))
+        .collect(),
+      ctx.db
+        .query("payments")
+        .withIndex("by_receivedDay", (q) =>
+          q.gte("receivedDay", from).lt("receivedDay", to)
+        )
+        .collect(),
+    ]);
+
+    const metrics = new Map<
+      Id<"productVariants">,
+      {
+        unitsSold: number;
+        returnedUnits: number;
+        exchangedUnits: number;
+        revenue: number;
+        landedCost: number;
+      }
+    >();
+    const getMetrics = (variantId: Id<"productVariants">) => {
+      const current = metrics.get(variantId) ?? {
+        unitsSold: 0,
+        returnedUnits: 0,
+        exchangedUnits: 0,
+        revenue: 0,
+        landedCost: 0,
+      };
+      metrics.set(variantId, current);
+      return current;
+    };
+    for (const movement of movements) {
+      if (
+        movement.reason === "sale" ||
+        movement.reason === "cancel" ||
+        movement.reason === "return" ||
+        movement.reason === "exchange_out" ||
+        movement.reason === "exchange_in"
+      ) {
+        getMetrics(movement.variantId).unitsSold -= movement.delta;
+      }
+      if (movement.reason === "return" && movement.delta > 0) {
+        getMetrics(movement.variantId).returnedUnits += movement.delta;
+      }
+      if (movement.reason === "exchange_out" && movement.delta > 0) {
+        getMetrics(movement.variantId).exchangedUnits += movement.delta;
+      }
+    }
+
+    const allocations = await loadPaymentVariantAllocations(ctx, payments);
+    for (const payment of payments) {
+      for (const allocation of allocations.get(payment._id) ?? []) {
+        const row = getMetrics(allocation.variantId);
+        row.revenue += allocation.revenue;
+        row.landedCost += allocation.landedCost;
+      }
+    }
+
+    const variants = await Promise.all(
+      [...metrics.keys()].map((variantId) => ctx.db.get(variantId))
+    );
+    const productIds = [
+      ...new Set(
+        variants.filter((variant) => variant !== null).map((variant) => variant.productId)
+      ),
+    ];
+    const products = await Promise.all(productIds.map((productId) => ctx.db.get(productId)));
+    const productById = new Map(
+      products.filter((product) => product !== null).map((product) => [product._id, product])
+    );
+    const search = args.search?.trim().toLowerCase() ?? "";
+    const rows = variants
+      .filter((variant) => variant !== null)
+      .map((variant) => {
+        const product = productById.get(variant.productId);
+        if (!product) return null;
+        const values = metrics.get(variant._id)!;
+        return {
+          productId: product._id,
+          variantId: variant._id,
+          productName: product.name,
+          productCode: product.code,
+          size: variant.size,
+          color: variant.color,
+          sku: variant.sku,
+          ...values,
+          profit: values.revenue - values.landedCost,
+        };
+      })
+      .filter((row) => row !== null)
+      .filter(
+        (row) =>
+          !search ||
+          [row.productName, row.productCode, row.size, row.color, row.sku]
+            .filter((value) => value !== undefined)
+            .some((value) => value.toLowerCase().includes(search))
+      )
+      .sort(
+        (a, b) =>
+          b.unitsSold - a.unitsSold ||
+          b.revenue - a.revenue ||
+          a.productName.localeCompare(b.productName) ||
+          a.size.localeCompare(b.size) ||
+          (a.color ?? "").localeCompare(b.color ?? "") ||
+          a.variantId.localeCompare(b.variantId)
+      );
+
+    const totals = {
+      unitsSold: 0,
+      returnedUnits: 0,
+      exchangedUnits: 0,
+      revenue: 0,
+      landedCost: 0,
+      profit: 0,
+    };
+    for (const row of rows) {
+      totals.unitsSold += row.unitsSold;
+      totals.returnedUnits += row.returnedUnits;
+      totals.exchangedUnits += row.exchangedUnits;
+      totals.revenue += row.revenue;
+      totals.landedCost += row.landedCost;
+      totals.profit += row.profit;
+    }
+    const requestedOffset = Number(args.paginationOpts.cursor ?? "0");
+    const offset =
+      Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+        ? requestedOffset
+        : 0;
+    const pageSize = Math.min(Math.max(Math.floor(args.paginationOpts.numItems), 1), 100);
+    const page = rows.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    return {
+      periodType: args.period.type,
+      periodValue: args.period.value,
+      fromDay: from,
+      toDay: to,
+      totals,
+      page,
+      continueCursor: nextOffset < rows.length ? String(nextOffset) : "",
+      total: rows.length,
+    };
+  },
+});
+
+export const getInventoryValueReport = query({
+  args: {
+    search: v.optional(v.string()),
+    status: v.optional(
+      v.union(v.literal("all"), v.literal("active"), v.literal("inactive"))
+    ),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: inventoryValueReport,
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    const products = await ctx.db.query("products").withIndex("by_nameLower").collect();
+    const variantsByProduct = await Promise.all(
+      products.map(async (product) => ({
+        product,
+        variants: await ctx.db
+          .query("productVariants")
+          .withIndex("by_product", (q) => q.eq("productId", product._id))
+          .collect(),
+      }))
+    );
+    const valuedRows = await Promise.all(
+      variantsByProduct.flatMap(({ product, variants }) =>
+        variants.map(async (variant) => {
+          const [currentQty, weightedLandedUnitCost] = await Promise.all([
+            variantQty(ctx, variant._id),
+            weightedAvgCost(ctx, variant._id, variant, product),
+          ]);
+          const active = product.active && variant.active;
+          return {
+            productId: product._id,
+            variantId: variant._id,
+            productName: product.name,
+            productCode: product.code,
+            size: variant.size,
+            color: variant.color,
+            sku: variant.sku,
+            productActive: product.active,
+            variantActive: variant.active,
+            active,
+            currentQty,
+            weightedLandedUnitCost,
+            totalValue: Math.max(0, currentQty) * weightedLandedUnitCost,
+          };
+        })
+      )
+    );
+    const search = args.search?.trim().toLowerCase() ?? "";
+    const status = args.status ?? "all";
+    const rows = valuedRows
+      .filter(
+        (row) =>
+          status === "all" ||
+          (status === "active" ? row.active : !row.active)
+      )
+      .filter(
+        (row) =>
+          !search ||
+          [row.productName, row.productCode, row.size, row.color, row.sku]
+            .filter((value): value is string => value !== undefined)
+            .some((value) => value.toLowerCase().includes(search))
+      )
+      .sort(
+        (a, b) =>
+          b.totalValue - a.totalValue ||
+          a.productName.localeCompare(b.productName) ||
+          a.size.localeCompare(b.size) ||
+          (a.color ?? "").localeCompare(b.color ?? "") ||
+          a.variantId.localeCompare(b.variantId)
+      );
+    const totals = {
+      totalUnits: 0,
+      totalValue: 0,
+      variantCount: rows.length,
+      inactiveVariantCount: 0,
+    };
+    for (const row of rows) {
+      totals.totalUnits += Math.max(0, row.currentQty);
+      totals.totalValue += row.totalValue;
+      if (!row.active) totals.inactiveVariantCount += 1;
+    }
+    const requestedOffset = Number(args.paginationOpts.cursor ?? "0");
+    const offset =
+      Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+        ? requestedOffset
+        : 0;
+    const pageSize = Math.min(Math.max(Math.floor(args.paginationOpts.numItems), 1), 100);
+    const page = rows.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    return {
+      totals,
+      page,
+      continueCursor: nextOffset < rows.length ? String(nextOffset) : "",
+      total: rows.length,
+    };
+  },
+});
+
+export const getDeadStockReport = query({
+  args: {
+    thresholdDays: deadStockThreshold,
+    search: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: deadStockReport,
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    const shop = await getShop(ctx);
+    const asOfDay = dayString(Date.now(), shop.timezone);
+    const asOfOrdinal = calendarDayOrdinal(asOfDay);
+    const products = await ctx.db.query("products").withIndex("by_nameLower").collect();
+    const variantsByProduct = await Promise.all(
+      products.map(async (product) => ({
+        product,
+        variants: await ctx.db
+          .query("productVariants")
+          .withIndex("by_product", (q) => q.eq("productId", product._id))
+          .collect(),
+      }))
+    );
+    const candidates = await Promise.all(
+      variantsByProduct.flatMap(({ product, variants }) =>
+        variants.map(async (variant) => {
+          const ledger = await ctx.db
+            .query("stockLedger")
+            .withIndex("by_variant_ts", (q) => q.eq("variantId", variant._id))
+            .collect();
+          let currentQty = 0;
+          let firstStockedAt: number | undefined;
+          let lastSoldAt: number | undefined;
+          for (const movement of ledger) {
+            currentQty += movement.delta;
+            if (
+              movement.delta > 0 &&
+              (firstStockedAt === undefined || movement.ts < firstStockedAt)
+            ) {
+              firstStockedAt = movement.ts;
+            }
+            if (
+              movement.delta < 0 &&
+              (movement.reason === "sale" || movement.reason === "exchange_in") &&
+              (lastSoldAt === undefined || movement.ts > lastSoldAt)
+            ) {
+              lastSoldAt = movement.ts;
+            }
+          }
+          if (currentQty <= 0) return null;
+          const agingAnchorAt = lastSoldAt ?? firstStockedAt ?? variant._creationTime;
+          const ageDays = Math.max(
+            0,
+            asOfOrdinal -
+              calendarDayOrdinal(dayString(agingAnchorAt, shop.timezone))
+          );
+          if (ageDays < args.thresholdDays) return null;
+          const weightedLandedUnitCost = await weightedAvgCost(
+            ctx,
+            variant._id,
+            variant,
+            product
+          );
+          return {
+            productId: product._id,
+            variantId: variant._id,
+            productName: product.name,
+            productCode: product.code,
+            size: variant.size,
+            color: variant.color,
+            sku: variant.sku,
+            active: product.active && variant.active,
+            currentQty,
+            ...(lastSoldAt !== undefined ? { lastSoldAt } : {}),
+            agingAnchorAt,
+            ageDays,
+            weightedLandedUnitCost,
+            tiedUpValue: currentQty * weightedLandedUnitCost,
+          };
+        })
+      )
+    );
+    const search = args.search?.trim().toLowerCase() ?? "";
+    const rows = candidates
+      .filter((row) => row !== null)
+      .filter(
+        (row) =>
+          !search ||
+          [row.productName, row.productCode, row.size, row.color, row.sku]
+            .filter((value): value is string => value !== undefined)
+            .some((value) => value.toLowerCase().includes(search))
+      )
+      .sort(
+        (a, b) =>
+          b.ageDays - a.ageDays ||
+          b.tiedUpValue - a.tiedUpValue ||
+          a.productName.localeCompare(b.productName) ||
+          a.size.localeCompare(b.size) ||
+          (a.color ?? "").localeCompare(b.color ?? "") ||
+          a.variantId.localeCompare(b.variantId)
+      );
+    const totals = {
+      totalUnits: 0,
+      tiedUpValue: 0,
+      variantCount: rows.length,
+      neverSoldCount: 0,
+      inactiveVariantCount: 0,
+    };
+    for (const row of rows) {
+      totals.totalUnits += row.currentQty;
+      totals.tiedUpValue += row.tiedUpValue;
+      if (row.lastSoldAt === undefined) totals.neverSoldCount += 1;
+      if (!row.active) totals.inactiveVariantCount += 1;
+    }
+    const requestedOffset = Number(args.paginationOpts.cursor ?? "0");
+    const offset =
+      Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+        ? requestedOffset
+        : 0;
+    const pageSize = Math.min(Math.max(Math.floor(args.paginationOpts.numItems), 1), 100);
+    const page = rows.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    return {
+      asOfDay,
+      thresholdDays: args.thresholdDays,
+      totals,
+      page,
+      continueCursor: nextOffset < rows.length ? String(nextOffset) : "",
+      total: rows.length,
+    };
+  },
+});
+
+export const getReorderPlanningReport = query({
+  args: {
+    lookbackDays: reorderDays,
+    targetDays: reorderDays,
+    search: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: reorderPlanningReport,
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    const shop = await getShop(ctx);
+    const asOfDay = dayString(Date.now(), shop.timezone);
+    const asOfOrdinal = calendarDayOrdinal(asOfDay);
+    const fromDay = dayFromOrdinal(asOfOrdinal - args.lookbackDays + 1);
+    const nextDay = dayFromOrdinal(asOfOrdinal + 1);
+    const fromMs = dayRange(fromDay, shop.timezone).from;
+    const toMs = dayRange(nextDay, shop.timezone).from;
+    const products = (
+      await ctx.db.query("products").withIndex("by_nameLower").collect()
+    ).filter((product) => product.active);
+    const variantsByProduct = await Promise.all(
+      products.map(async (product) => ({
+        product,
+        variants: (
+          await ctx.db
+            .query("productVariants")
+            .withIndex("by_product", (q) => q.eq("productId", product._id))
+            .collect()
+        ).filter((variant) => variant.active),
+      }))
+    );
+    const planned = await Promise.all(
+      variantsByProduct.flatMap(({ product, variants }) =>
+        variants.map(async (variant) => {
+          const ledger = await ctx.db
+            .query("stockLedger")
+            .withIndex("by_variant_ts", (q) => q.eq("variantId", variant._id))
+            .collect();
+          let currentQty = 0;
+          let unitsSoldInLookback = 0;
+          for (const movement of ledger) {
+            currentQty += movement.delta;
+            if (movement.ts < fromMs || movement.ts >= toMs) continue;
+            if (
+              movement.reason === "sale" ||
+              movement.reason === "cancel" ||
+              movement.reason === "return" ||
+              movement.reason === "exchange_out" ||
+              movement.reason === "exchange_in"
+            ) {
+              unitsSoldInLookback -= movement.delta;
+            }
+          }
+          unitsSoldInLookback = Math.max(0, unitsSoldInLookback);
+          if (unitsSoldInLookback === 0) return null;
+          const averageDaily = unitsSoldInLookback / args.lookbackDays;
+          const targetQty = Math.ceil(averageDaily * args.targetDays);
+          const suggestedReorderQty = Math.max(0, targetQty - Math.max(0, currentQty));
+          if (suggestedReorderQty === 0) return null;
+          const weightedLandedUnitCost = await weightedAvgCost(
+            ctx,
+            variant._id,
+            variant,
+            product
+          );
+          return {
+            productId: product._id,
+            variantId: variant._id,
+            productName: product.name,
+            productCode: product.code,
+            size: variant.size,
+            color: variant.color,
+            sku: variant.sku,
+            currentQty,
+            unitsSoldInLookback,
+            averageDailyUnits: Math.round(averageDaily * 100) / 100,
+            estimatedDaysRemaining: Math.floor(Math.max(0, currentQty) / averageDaily),
+            suggestedReorderQty,
+            weightedLandedUnitCost,
+            estimatedReorderCost: suggestedReorderQty * weightedLandedUnitCost,
+          };
+        })
+      )
+    );
+    const search = args.search?.trim().toLowerCase() ?? "";
+    const rows = planned
+      .filter((row) => row !== null)
+      .filter(
+        (row) =>
+          !search ||
+          [row.productName, row.productCode, row.size, row.color, row.sku]
+            .filter((value): value is string => value !== undefined)
+            .some((value) => value.toLowerCase().includes(search))
+      )
+      .sort(
+        (a, b) =>
+          b.suggestedReorderQty - a.suggestedReorderQty ||
+          a.estimatedDaysRemaining - b.estimatedDaysRemaining ||
+          a.productName.localeCompare(b.productName) ||
+          a.size.localeCompare(b.size) ||
+          a.variantId.localeCompare(b.variantId)
+      );
+    const totals = {
+      variantCount: rows.length,
+      suggestedUnits: 0,
+      estimatedReorderCost: 0,
+    };
+    for (const row of rows) {
+      totals.suggestedUnits += row.suggestedReorderQty;
+      totals.estimatedReorderCost += row.estimatedReorderCost;
+    }
+    const requestedOffset = Number(args.paginationOpts.cursor ?? "0");
+    const offset =
+      Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+        ? requestedOffset
+        : 0;
+    const pageSize = Math.min(Math.max(Math.floor(args.paginationOpts.numItems), 1), 100);
+    const page = rows.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    return {
+      asOfDay,
+      lookbackDays: args.lookbackDays,
+      targetDays: args.targetDays,
+      fromDay,
+      totals,
+      page,
+      continueCursor: nextOffset < rows.length ? String(nextOffset) : "",
+      total: rows.length,
+    };
   },
 });
 

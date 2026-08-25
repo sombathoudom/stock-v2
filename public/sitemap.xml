@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- Only public-facing pages are listed. -->
+  <!-- All /dashboard, /sales, /products, /stock, /reports, /customers, -->
+  <!-- /purchases, /expenses, /settings, etc. require authentication. -->
+  <url>
+    <loc>https://0676-36-37-204-107.ngrok-free.app/sign-in</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://0676-36-37-204-107.ngrok-free.app/sign-up</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.5</priority>
+  </url>
+</urlset>

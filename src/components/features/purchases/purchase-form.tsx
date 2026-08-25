@@ -210,6 +210,8 @@ export function PurchaseForm({
   // grand total is display-only (the server re-derives everything).
   const deliveryCost = inputToCents(form.watch("deliveryCost")) ?? 0;
   const otherCost = inputToCents(form.watch("otherCost")) ?? 0;
+  const deliveryPerPiece =
+    totalPieces > 0 ? Math.round(deliveryCost / totalPieces) : 0;
   const grandTotal = totalCost + deliveryCost + otherCost;
 
   // Summary groups: ONE row per product, its lines sorted by the product's
@@ -488,7 +490,10 @@ export function PurchaseForm({
                             {g.pieces}
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {formatMoney(g.cost, currency)}
+                            {formatMoney(
+                              g.cost + g.pieces * deliveryPerPiece,
+                              currency
+                            )}
                           </TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-1">
@@ -525,17 +530,18 @@ export function PurchaseForm({
                             <table> (row hover/border styles would clash). */}
                         <TableRow className="hover:bg-transparent">
                           <TableCell colSpan={4} className="px-4 pb-3 pt-0">
-                            <div className="overflow-hidden rounded-md border">
-                              <div className="grid grid-cols-[minmax(0,1fr)_4rem_6rem_6rem] items-center gap-2 border-b bg-muted/50 px-3 py-1.5 text-sm font-medium">
+                            <div className="overflow-x-auto rounded-md border">
+                              <div className="grid min-w-[38rem] grid-cols-[minmax(8rem,1fr)_4rem_8rem_8rem_7rem] items-center gap-3 border-b bg-muted/50 px-3 py-1.5 text-sm font-medium">
                                 <span>{t().purchases.size}</span>
                                 <span className="text-right">{t().purchases.qty}</span>
-                                <span className="text-right">{t().purchases.unitCost}</span>
+                                <span className="whitespace-nowrap text-right">{t().purchases.unitCost}</span>
+                                <span className="whitespace-nowrap text-right">{t().purchases.costAfterDelivery}</span>
                                 <span className="text-right">{t().common.total}</span>
                               </div>
                               {g.lines.map((l, i) => (
                                 <div
                                   key={l.key}
-                                  className={`grid grid-cols-[minmax(0,1fr)_4rem_6rem_6rem] items-center gap-2 px-3 py-2 text-sm ${
+                                  className={`grid min-w-[38rem] grid-cols-[minmax(8rem,1fr)_4rem_8rem_8rem_7rem] items-center gap-3 px-3 py-2 text-sm ${
                                     i < g.lines.length - 1 ? "border-b" : ""
                                   }`}
                                 >
@@ -547,7 +553,16 @@ export function PurchaseForm({
                                     {formatMoney(l.unitCost, currency)}
                                   </span>
                                   <span className="text-right tabular-nums">
-                                    {formatMoney(l.qty * l.unitCost, currency)}
+                                    {formatMoney(
+                                      l.unitCost + deliveryPerPiece,
+                                      currency
+                                    )}
+                                  </span>
+                                  <span className="text-right tabular-nums">
+                                    {formatMoney(
+                                      l.qty * (l.unitCost + deliveryPerPiece),
+                                      currency
+                                    )}
                                   </span>
                                 </div>
                               ))}
@@ -598,7 +613,10 @@ export function PurchaseForm({
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
                           <span className="text-sm font-semibold tabular-nums">
-                            {formatMoney(g.cost, currency)}
+                            {formatMoney(
+                              g.cost + g.pieces * deliveryPerPiece,
+                              currency
+                            )}
                           </span>
                           <Button
                             size="sm"
@@ -639,7 +657,16 @@ export function PurchaseForm({
                               <span className="text-foreground">× {l.qty}</span>
                             </span>
                             <span className="shrink-0 text-right tabular-nums">
-                              {formatMoney(l.qty * l.unitCost, currency)}
+                              {formatMoney(
+                                l.qty * (l.unitCost + deliveryPerPiece),
+                                currency
+                              )}
+                              <span className="block text-[11px] text-muted-foreground">
+                                {t().purchases.costAfterDelivery}: {formatMoney(
+                                  l.unitCost + deliveryPerPiece,
+                                  currency
+                                )}
+                              </span>
                             </span>
                           </div>
                         ))}
@@ -663,6 +690,7 @@ export function PurchaseForm({
               <FormMoney
                 name="deliveryCost"
                 label={`${t().purchases.deliveryCost} (${currency})`}
+                hint={t().purchases.deliveryCostHint}
                 placeholder="0.00"
               />
               <FormMoney
@@ -683,6 +711,12 @@ export function PurchaseForm({
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">{t().purchases.deliveryCost}</dt>
                 <dd className="tabular-nums">{formatMoney(deliveryCost, currency)}</dd>
+              </div>
+              <div className="flex items-center justify-between">
+                <dt className="text-muted-foreground">{t().purchases.deliveryPerPiece}</dt>
+                <dd className="tabular-nums">
+                  {formatMoney(deliveryPerPiece, currency)}
+                </dd>
               </div>
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">{t().purchases.otherCost}</dt>

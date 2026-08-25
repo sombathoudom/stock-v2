@@ -358,6 +358,14 @@ export const paymentDoc = v.object({
   note: v.optional(v.string()),
 });
 
+export const expenseCategoryDoc = v.object({
+  _id: v.id("expenseCategories"),
+  _creationTime: v.number(),
+  name: v.string(),
+  nameLower: v.string(),
+  active: v.boolean(),
+});
+
 export const expenseDoc = v.object({
   _id: v.id("expenses"),
   _creationTime: v.number(),
@@ -685,6 +693,173 @@ export const stockMovementRow = v.object({
   row: stockLedgerDoc,
   label: v.string(), // "Basic Tee — M · Black"
   userName: v.string(),
+});
+
+export const customerDebtAging = v.object({
+  days0To7: v.number(),
+  days8To30: v.number(),
+  days31To60: v.number(),
+  over60Days: v.number(),
+});
+
+export const customerDebtRow = v.object({
+  customerId: v.id("customers"),
+  customerName: v.string(),
+  customerPhone: v.string(),
+  totalOwed: v.number(),
+  unpaidOrderCount: v.number(),
+  aging: customerDebtAging,
+  oldestOrderId: v.id("sales"),
+  oldestOrderCode: v.string(),
+  oldestOrderAt: v.number(),
+  oldestAgeDays: v.number(),
+});
+
+export const customerDebtReport = v.object({
+  asOfDay: v.string(),
+  totalOwed: v.number(),
+  customerCount: v.number(),
+  aging: customerDebtAging,
+  page: v.array(customerDebtRow),
+  continueCursor: v.string(),
+  total: v.number(),
+});
+
+export const productPerformanceTotals = v.object({
+  unitsSold: v.number(),
+  returnedUnits: v.number(),
+  exchangedUnits: v.number(),
+  revenue: v.number(),
+  landedCost: v.number(),
+  profit: v.number(),
+});
+
+export const productPerformanceRow = v.object({
+  productId: v.id("products"),
+  variantId: v.id("productVariants"),
+  productName: v.string(),
+  productCode: v.optional(v.string()),
+  size: v.string(),
+  color: v.optional(v.string()),
+  sku: v.optional(v.string()),
+  unitsSold: v.number(),
+  returnedUnits: v.number(),
+  exchangedUnits: v.number(),
+  revenue: v.number(),
+  landedCost: v.number(),
+  profit: v.number(),
+});
+
+export const productPerformanceReport = v.object({
+  periodType: v.union(v.literal("day"), v.literal("month"), v.literal("year")),
+  periodValue: v.string(),
+  fromDay: v.string(),
+  toDay: v.string(),
+  totals: productPerformanceTotals,
+  page: v.array(productPerformanceRow),
+  continueCursor: v.string(),
+  total: v.number(),
+});
+
+export const inventoryValueRow = v.object({
+  productId: v.id("products"),
+  variantId: v.id("productVariants"),
+  productName: v.string(),
+  productCode: v.optional(v.string()),
+  size: v.string(),
+  color: v.optional(v.string()),
+  sku: v.optional(v.string()),
+  productActive: v.boolean(),
+  variantActive: v.boolean(),
+  active: v.boolean(),
+  currentQty: v.number(),
+  weightedLandedUnitCost: v.number(),
+  totalValue: v.number(),
+});
+
+export const inventoryValueReport = v.object({
+  totals: v.object({
+    totalUnits: v.number(),
+    totalValue: v.number(),
+    variantCount: v.number(),
+    inactiveVariantCount: v.number(),
+  }),
+  page: v.array(inventoryValueRow),
+  continueCursor: v.string(),
+  total: v.number(),
+});
+
+export const deadStockThreshold = v.union(
+  v.literal(30),
+  v.literal(60),
+  v.literal(90),
+  v.literal(180)
+);
+
+export const deadStockRow = v.object({
+  productId: v.id("products"),
+  variantId: v.id("productVariants"),
+  productName: v.string(),
+  productCode: v.optional(v.string()),
+  size: v.string(),
+  color: v.optional(v.string()),
+  sku: v.optional(v.string()),
+  active: v.boolean(),
+  currentQty: v.number(),
+  lastSoldAt: v.optional(v.number()),
+  agingAnchorAt: v.number(),
+  ageDays: v.number(),
+  weightedLandedUnitCost: v.number(),
+  tiedUpValue: v.number(),
+});
+
+export const deadStockReport = v.object({
+  asOfDay: v.string(),
+  thresholdDays: deadStockThreshold,
+  totals: v.object({
+    totalUnits: v.number(),
+    tiedUpValue: v.number(),
+    variantCount: v.number(),
+    neverSoldCount: v.number(),
+    inactiveVariantCount: v.number(),
+  }),
+  page: v.array(deadStockRow),
+  continueCursor: v.string(),
+  total: v.number(),
+});
+
+export const reorderDays = v.union(v.literal(30), v.literal(60), v.literal(90));
+
+export const reorderPlanningRow = v.object({
+  productId: v.id("products"),
+  variantId: v.id("productVariants"),
+  productName: v.string(),
+  productCode: v.optional(v.string()),
+  size: v.string(),
+  color: v.optional(v.string()),
+  sku: v.optional(v.string()),
+  currentQty: v.number(),
+  unitsSoldInLookback: v.number(),
+  averageDailyUnits: v.number(),
+  estimatedDaysRemaining: v.number(),
+  suggestedReorderQty: v.number(),
+  weightedLandedUnitCost: v.number(),
+  estimatedReorderCost: v.number(),
+});
+
+export const reorderPlanningReport = v.object({
+  asOfDay: v.string(),
+  lookbackDays: reorderDays,
+  targetDays: reorderDays,
+  fromDay: v.string(),
+  totals: v.object({
+    variantCount: v.number(),
+    suggestedUnits: v.number(),
+    estimatedReorderCost: v.number(),
+  }),
+  page: v.array(reorderPlanningRow),
+  continueCursor: v.string(),
+  total: v.number(),
 });
 
 /** One ledger row belonging to a purchase — its stock trace (T21). */

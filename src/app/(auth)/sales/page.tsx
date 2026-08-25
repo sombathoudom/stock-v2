@@ -1,9 +1,7 @@
 "use client";
 
 import {
-  Cancel01Icon,
   PlusSignIcon,
-  Search01Icon,
   ShoppingBag01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -17,7 +15,6 @@ import {
   DataTable,
   type DataTableColumn,
 } from "@/components/features/data-table/data-table";
-import { CustomerFilter } from "@/components/features/sales/customer-filter";
 import { PaymentStatusBadge } from "@/components/features/sales/payment-status-badge";
 import {
   SaleRowActions,
@@ -25,22 +22,18 @@ import {
 } from "@/components/features/sales/sale-row-actions";
 import { SaleStatusBadge } from "@/components/features/sales/sale-status-badge";
 import {
+  SalesFilterPanel,
+  type SalesPaymentFilter,
+  type SalesStatusFilter,
+} from "@/components/features/sales/sales-filter-panel";
+import {
   SalesSummaryCards,
   type SalesFilters,
 } from "@/components/features/sales/sales-summary-cards";
 import { PageToolbar } from "@/components/features/shell/page-toolbar";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import { formatDateTime, formatMoney, getLang, t } from "@/lib/utils";
@@ -53,56 +46,6 @@ import { formatDateTime, formatMoney, getLang, t } from "@/lib/utils";
 // filters take the SAME args, so card numbers always match the rows.
 // Every row shows its computed total / paid / remaining; tapping opens the
 // order detail (UUID route).
-
-type Filter = "all" | "today" | "unpaid" | SaleListRow["sale"]["status"];
-
-const STATUS_FILTERS: Filter[] = [
-  "all",
-  "today",
-  "unpaid",
-  "confirmed",
-  "pending",
-  "packed",
-  "delivering",
-  "delivered",
-  "partially_delivered",
-  "cancelled",
-];
-
-function filterLabel(filter: Filter): string {
-  switch (filter) {
-    case "all":
-      return t().sales.allStatuses;
-    case "today":
-      return t().sales.today;
-    case "unpaid":
-      return t().sales.unpaid;
-    default:
-      return t().status[filter];
-  }
-}
-
-type PaymentFilter = "all" | "paid" | "partly_paid" | "unpaid";
-
-const PAYMENT_FILTERS: PaymentFilter[] = [
-  "all",
-  "paid",
-  "partly_paid",
-  "unpaid",
-];
-
-function paymentFilterLabel(p: PaymentFilter): string {
-  switch (p) {
-    case "all":
-      return t().sales.allPaymentStatuses;
-    case "paid":
-      return t().sales.paymentStatuses.paid;
-    case "partly_paid":
-      return t().sales.paymentStatuses.partlyPaid;
-    case "unpaid":
-      return t().sales.paymentStatuses.unpaid;
-  }
-}
 
 /** Today's YYYY-MM-DD in the shop timezone (en-CA formats as ISO date). */
 function todayInTimezone(timezone: string): string {
@@ -130,7 +73,7 @@ export default function SalesPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  const [filter, setFilter] = usePersistentState<Filter>("sales:filter", "all");
+  const [filter, setFilter] = usePersistentState<SalesStatusFilter>("sales:filter", "all");
   const [channelId, setChannelId] = usePersistentState("sales:channel", "all");
   const [fromDay, setFromDay] = usePersistentState("sales:fromDay", "");
   const [toDay, setToDay] = usePersistentState("sales:toDay", "");
@@ -138,7 +81,7 @@ export default function SalesPage() {
     Id<"customers"> | "all"
   >("sales:customer", "all");
   const [paymentFilter, setPaymentFilter] =
-    usePersistentState<PaymentFilter>("sales:paymentStatus", "all");
+    usePersistentState<SalesPaymentFilter>("sales:paymentStatus", "all");
 
   // Deep links like /sales?filter=unpaid (dashboard "View all") preselect the
   // filter once on mount; afterwards the persisted preference wins.
@@ -161,15 +104,6 @@ export default function SalesPage() {
     setPageIndex(0);
     setCursors([]);
   }
-
-  const isFiltered =
-    search !== "" ||
-    filter !== "all" ||
-    channelId !== "all" ||
-    fromDay !== "" ||
-    toDay !== "" ||
-    customerFilter !== "all" ||
-    paymentFilter !== "all";
 
   function clearFilters() {
     setSearch("");
@@ -347,145 +281,47 @@ export default function SalesPage() {
           always match the rows. */}
       <SalesSummaryCards filters={filters} />
 
-      {/* Filters — one compact line; scrolls sideways on narrow screens. */}
-      <div className="flex items-center gap-1 overflow-x-auto px-4 pt-4">
-        <InputGroup className="h-8 w-38 shrink-0">
-          <InputGroupAddon>
-            <HugeiconsIcon icon={Search01Icon} strokeWidth={2} className="size-3.5" />
-          </InputGroupAddon>
-          <InputGroupInput
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              resetPages();
-            }}
-            placeholder={t().sales.searchCode}
-            aria-label={t().sales.searchCode}
-          />
-        </InputGroup>
-        <Select
-          value={filter}
-          // Base UI shows the RAW value in the trigger without this map.
-          items={Object.fromEntries(STATUS_FILTERS.map((f) => [f, filterLabel(f)]))}
-          onValueChange={(v) => {
-            const next = (v ?? "all") as Filter;
-            setFilter(next);
-            // "unpaid" is the shortcut for the payment-status filter — make
-            // sure the two never fight over payment state.
-            if (next === "unpaid") setPaymentFilter("all");
-            resetPages();
-          }}
-        >
-          <SelectTrigger size="sm" className="w-28 shrink-0 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {STATUS_FILTERS.map((f) => (
-              <SelectItem key={f} value={f}>
-                {filterLabel(f)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select
-          value={channelId}
-          // Base UI shows the RAW value in the trigger without this map.
-          items={{
-            all: t().sales.allChannels,
-            ...Object.fromEntries(channels.map((c) => [c._id, c.name])),
-          }}
-          onValueChange={(v) => {
-            setChannelId(v ?? "all");
-            resetPages();
-          }}
-        >
-          <SelectTrigger size="sm" className="w-38 shrink-0 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{t().sales.allChannels}</SelectItem>
-            {channels.map((c) => (
-              <SelectItem key={c._id} value={c._id}>
-                {c.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <label className="flex shrink-0 items-center gap-1">
-          <span className="text-xs text-muted-foreground">
-            {t().sales.fromDate}
-          </span>
-          <Input
-            type="date"
-            value={fromDay}
-            onChange={(e) => {
-              setFromDay(e.target.value);
-              resetPages();
-            }}
-            className="h-8 w-28 px-1 text-xs"
-          />
-        </label>
-        <label className="flex shrink-0 items-center gap-1">
-          <span className="text-xs text-muted-foreground">
-            {t().sales.toDate}
-          </span>
-          <Input
-            type="date"
-            value={toDay}
-            onChange={(e) => {
-              setToDay(e.target.value);
-              resetPages();
-            }}
-            className="h-8 w-28 px-1 text-xs"
-          />
-        </label>
-        <div className="w-48 shrink-0">
-          <CustomerFilter
-            value={customerFilter}
-            onChange={(v) => {
-              setCustomerFilter(v);
-              resetPages();
-            }}
-            className="h-8"
-          />
-        </div>
-        <Select
-          value={paymentFilter}
-          // Base UI shows the RAW value in the trigger without this map.
-          items={Object.fromEntries(
-            PAYMENT_FILTERS.map((p) => [p, paymentFilterLabel(p)])
-          )}
-          onValueChange={(v) => {
-            const next = (v ?? "all") as PaymentFilter;
-            setPaymentFilter(next);
-            // The status "unpaid" shortcut is also payment state — an
-            // explicit payment filter wins and the shortcut resets.
-            if (next !== "all") setFilter("all");
-            resetPages();
-          }}
-        >
-          <SelectTrigger size="sm" className="w-40 shrink-0 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PAYMENT_FILTERS.map((p) => (
-              <SelectItem key={p} value={p}>
-                {paymentFilterLabel(p)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 shrink-0 text-xs"
-          disabled={!isFiltered}
-          onClick={clearFilters}
-        >
-          <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-3.5" />
-          {t().sales.clearFilters}
-        </Button>
-      </div>
+      <SalesFilterPanel
+        search={search}
+        onSearchChange={(value) => {
+          setSearch(value);
+          resetPages();
+        }}
+        status={filter}
+        onStatusChange={(value) => {
+          setFilter(value);
+          if (value === "unpaid") setPaymentFilter("all");
+          resetPages();
+        }}
+        channelId={channelId}
+        channels={channels}
+        onChannelChange={(value) => {
+          setChannelId(value);
+          resetPages();
+        }}
+        fromDay={fromDay}
+        onFromDayChange={(value) => {
+          setFromDay(value);
+          resetPages();
+        }}
+        toDay={toDay}
+        onToDayChange={(value) => {
+          setToDay(value);
+          resetPages();
+        }}
+        customerId={customerFilter}
+        onCustomerChange={(value) => {
+          setCustomerFilter(value);
+          resetPages();
+        }}
+        paymentStatus={paymentFilter}
+        onPaymentStatusChange={(value) => {
+          setPaymentFilter(value);
+          if (value !== "all") setFilter("all");
+          resetPages();
+        }}
+        onClear={clearFilters}
+      />
 
       <div className="p-4">
         <DataTable

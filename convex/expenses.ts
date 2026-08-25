@@ -9,8 +9,8 @@ import { expenseDoc } from "./types";
 // is a row; daily P/L subtracts the rows whose spentDay matches the report
 // day (cash basis, indexed — reports never scan). There is no delete: an
 // expense is a financial record and the day's numbers must never silently
-// change — mistakes are fixed by editing the row. Category is free text; the
-// form suggests past categories, so the owner's category list grows itself.
+// change — mistakes are fixed by editing the row. Category text is snapshotted
+// on the expense so reports and old records survive category changes.
 
 const MIN_SPENT_AT = Date.parse("2000-01-01T00:00:00Z");
 const MAX_SPENT_AT = Date.parse("2100-01-01T00:00:00Z");
