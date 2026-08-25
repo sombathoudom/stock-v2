@@ -10,6 +10,7 @@ import { api } from "@convex/_generated/api";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn, imageUrl, t, toastError } from "@/lib/utils";
+import { compressImage } from "@/lib/image-compress";
 import { FormField } from "@/components/features/forms/form-field";
 
 // Product photo upload via Convex file storage. The upload URL is issued by
@@ -17,12 +18,17 @@ import { FormField } from "@/components/features/forms/form-field";
 // file is posted immediately (the URL is short-lived) and the storage id
 // lives in the form under `name`; a preview renders from /getImage.
 //
+// Photos are downscaled/re-encoded client-side before upload (phone cameras
+// produce multi-MB files that every screen renders as thumbnails) — see
+// lib/image-compress. The 10 MB cap applies to the COMPRESSED result; the
+// original may be larger.
+//
 // The visible "button" is a <label> for the sr-only file input: the browser
 // opens the OS file picker natively, with no JS click indirection. Some
 // browsers swallow programmatic .click() on display:none inputs, leaving a
 // dead button — native label activation works everywhere.
 
-const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_BYTES = 10 * 1024 * 1024; // 10 MB (after compression)
 
 export type ImageUploadProps = {
   name: string;
@@ -41,18 +47,25 @@ export function ImageUpload({ name, label, hint, className }: ImageUploadProps) 
   const storageId = (field.value as string | undefined) ?? undefined;
 
   async function onFile(file: File) {
-    if (!file.type.startsWith("image/") || file.size > MAX_BYTES) {
+    if (!file.type.startsWith("image/")) {
       toast.error(t().products.invalidImage);
       return;
     }
     setBusy(true);
     try {
+      // Downscale + re-encode before the size cap so big phone photos still
+      // upload (compressed) instead of being rejected outright.
+      const compressed = await compressImage(file);
+      if (compressed.size > MAX_BYTES) {
+        toast.error(t().products.invalidImage);
+        return;
+      }
       // Authenticated short-lived URL — post immediately.
       const url = await generateUploadUrl({});
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": file.type },
-        body: file,
+        headers: { "Content-Type": compressed.type },
+        body: compressed,
       });
       if (!res.ok) throw new Error(`Upload failed with status ${res.status}`);
       const { storageId: newStorageId } = (await res.json()) as { storageId: string };

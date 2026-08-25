@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useShop } from "@/hooks/use-shop";
+import { compressImage } from "@/lib/image-compress";
 import {
   centsToInput,
   formatDateTime,
@@ -84,11 +85,13 @@ function PhotoUpload({
     if (!file) return;
     setBusy(true);
     try {
+      // Downscale before upload — packaging shots come from the phone camera.
+      const compressed = await compressImage(file);
       const uploadUrl = await generateUploadUrl();
       const res = await fetch(uploadUrl, {
         method: "POST",
-        headers: { "Content-Type": file.type },
-        body: file,
+        headers: { "Content-Type": compressed.type },
+        body: compressed,
       });
       if (!res.ok) throw new Error("Upload failed");
       const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };
