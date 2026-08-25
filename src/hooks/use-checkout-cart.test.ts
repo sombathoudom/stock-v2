@@ -19,13 +19,12 @@ const variant = (
 });
 
 describe("addCartLine", () => {
-  test("keeps repeated adds as separate lines with unique keys", () => {
+  test("increments quantity when the same variant is added again", () => {
     const first = addCartLine([], variant("v-shirt", 2), "line-1");
     const second = addCartLine(first, variant("v-shirt", 2), "line-2");
 
-    expect(second).toHaveLength(2);
-    expect(second.map((line) => line.key)).toEqual(["line-1", "line-2"]);
-    expect(second.map((line) => line.qty)).toEqual([1, 1]);
+    expect(second).toHaveLength(1);
+    expect(second[0]).toEqual(expect.objectContaining({ key: "line-1", qty: 2 }));
   });
 
   test("caps aggregate quantity for the same variant at its stock snapshot", () => {
@@ -34,10 +33,10 @@ describe("addCartLine", () => {
     const overStock = addCartLine(second, variant("v-shirt", 2), "line-3");
 
     expect(overStock).toBe(second);
-    expect(overStock.reduce((total, line) => total + line.qty, 0)).toBe(2);
+    expect(overStock[0].qty).toBe(2);
   });
 
-  test("counts a discounted existing line toward stock without merging it", () => {
+  test("preserves the existing discount when increasing quantity", () => {
     const discounted = addCartLine(
       [],
       variant("v-shirt", 2, "1.00"),
@@ -46,7 +45,10 @@ describe("addCartLine", () => {
     const added = addCartLine(discounted, variant("v-shirt", 2), "regular");
     const overStock = addCartLine(added, variant("v-shirt", 2), "extra");
 
-    expect(added.map((line) => line.discount)).toEqual(["1.00", ""]);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toEqual(
+      expect.objectContaining({ qty: 2, discount: "1.00" })
+    );
     expect(overStock).toBe(added);
   });
 
@@ -80,6 +82,7 @@ describe("addCartLine", () => {
     expect(current).toEqual(snapshot);
     expect(current[0]).toBe(existing);
     expect(result).not.toBe(current);
-    expect(result[0]).toBe(existing);
+    expect(result[0]).not.toBe(existing);
+    expect(result[0].qty).toBe(2);
   });
 });

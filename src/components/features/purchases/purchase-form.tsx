@@ -72,7 +72,7 @@ import {
 
 // One shared form for create + edit (AGENTS.md T5): supplier combobox at the
 // top (search + quick-add), BULK item entry (every active variant of a
-// picked product becomes an editable row — one tap fills qty/cost/sale price
+// picked product becomes an editable row — one tap fills qty/cost
 // across all sizes), a summary that merges each product into ONE row (image
 // + name) with its variants nested inside, and an Order Summary block
 // (pieces, delivery cost, other cost, grand total). Dates drive the status:
@@ -158,7 +158,6 @@ export function PurchaseForm({
         color: variant.color,
         qty: item.qty,
         unitCost: item.unitCost,
-        currentPrice: variant.price ?? product.defaultPrice,
       })) ?? []
   );
   const [editLine, setEditLine] = useState<PurchaseLine | null>(null);
@@ -307,9 +306,6 @@ export function PurchaseForm({
         variantId: l.variantId,
         qty: l.qty,
         unitCost: l.unitCost,
-        // Only lines with a price change carry `price` — omitted = keep
-        // the variant's current sale price.
-        ...(l.price !== undefined ? { price: l.price } : {}),
       }));
       if (initial) {
         await update({
@@ -341,7 +337,6 @@ export function PurchaseForm({
             variantId: line.variantId,
             qty: line.qty,
             unitCost: line.unitCost,
-            ...(line.price !== undefined ? { price: line.price } : {}),
           })),
         };
         const idempotencyKey = createSubmit.begin(createPayload);
@@ -430,7 +425,6 @@ export function PurchaseForm({
         <BulkLineEntry
           key={editLine ? `group-${editLine.product._id}` : "add"}
           lines={lines}
-          currency={currency}
           editLine={editLine ?? undefined}
           onCancelEdit={() => setEditLine(null)}
           onSubmitLines={handleBulkSave}
@@ -532,17 +526,16 @@ export function PurchaseForm({
                         <TableRow className="hover:bg-transparent">
                           <TableCell colSpan={4} className="px-4 pb-3 pt-0">
                             <div className="overflow-hidden rounded-md border">
-                              <div className="grid grid-cols-[minmax(0,1fr)_4rem_6rem_6rem_6rem] items-center gap-2 border-b bg-muted/50 px-3 py-1.5 text-sm font-medium">
+                              <div className="grid grid-cols-[minmax(0,1fr)_4rem_6rem_6rem] items-center gap-2 border-b bg-muted/50 px-3 py-1.5 text-sm font-medium">
                                 <span>{t().purchases.size}</span>
                                 <span className="text-right">{t().purchases.qty}</span>
                                 <span className="text-right">{t().purchases.unitCost}</span>
-                                <span className="text-right">{t().purchases.salePrice}</span>
                                 <span className="text-right">{t().common.total}</span>
                               </div>
                               {g.lines.map((l, i) => (
                                 <div
                                   key={l.key}
-                                  className={`grid grid-cols-[minmax(0,1fr)_4rem_6rem_6rem_6rem] items-center gap-2 px-3 py-2 text-sm ${
+                                  className={`grid grid-cols-[minmax(0,1fr)_4rem_6rem_6rem] items-center gap-2 px-3 py-2 text-sm ${
                                     i < g.lines.length - 1 ? "border-b" : ""
                                   }`}
                                 >
@@ -552,13 +545,6 @@ export function PurchaseForm({
                                   <span className="text-right tabular-nums">{l.qty}</span>
                                   <span className="text-right tabular-nums">
                                     {formatMoney(l.unitCost, currency)}
-                                  </span>
-                                  {/* Only a CHANGED price shows — "—" means
-                                      the current sale price is kept. */}
-                                  <span className="text-right tabular-nums">
-                                    {l.price !== undefined && l.price !== l.currentPrice
-                                      ? `→ ${formatMoney(l.price, currency)}`
-                                      : "—"}
                                   </span>
                                   <span className="text-right tabular-nums">
                                     {formatMoney(l.qty * l.unitCost, currency)}
@@ -654,11 +640,6 @@ export function PurchaseForm({
                             </span>
                             <span className="shrink-0 text-right tabular-nums">
                               {formatMoney(l.qty * l.unitCost, currency)}
-                              {l.price !== undefined && l.price !== l.currentPrice && (
-                                <span className="block text-[11px] text-muted-foreground">
-                                  → {formatMoney(l.price, currency)}
-                                </span>
-                              )}
                             </span>
                           </div>
                         ))}

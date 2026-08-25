@@ -195,6 +195,21 @@ export default function NewSalePage() {
     () => false,
   );
 
+  // iOS Safari pins position:fixed elements to the LAYOUT viewport, but SPA
+  // navigation (Dashboard → Sale/New) and the payment Sheet's scroll lock can
+  // leave the URL bar expanded — the visible area is then shorter than the
+  // layout viewport and the portaled footer sits behind Safari's bottom bar
+  // until a reload. Scrolling to the top collapses the bar, realigning both
+  // viewports: on mount, and after the payment dialog closes.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+  const prevOrderOpenRef = useRef(orderOpen);
+  useEffect(() => {
+    if (prevOrderOpenRef.current && !orderOpen) window.scrollTo(0, 0);
+    prevOrderOpenRef.current = orderOpen;
+  }, [orderOpen]);
+
   // ④ Delivery company → shipping-fee auto-fill. The company's default fee
   // lands in the shipping input; a fee the cashier typed themselves is never
   // clobbered (only an empty box or the previous suggestion is replaced).
@@ -435,7 +450,7 @@ export default function NewSalePage() {
   );
 
   const mobileFooter = (
-    <footer className="fixed inset-x-0 bottom-0 z-[100] border-t bg-background px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 lg:hidden">
+    <footer className="fixed inset-x-0 bottom-0 z-[100] border-t bg-background px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 md:hidden">
       <div className="grid grid-cols-5 items-center gap-1">
         <Button
           type="button"
@@ -505,7 +520,7 @@ export default function NewSalePage() {
           space runs out on narrow screens. */}
       <div
         className={cn(
-          "min-h-14 max-h-[45dvh] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 overflow-y-auto overscroll-contain border-b px-2 py-2 sm:px-4 lg:flex",
+          "min-h-14 max-h-[45dvh] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 overflow-y-auto overscroll-contain border-b px-2 py-2 sm:px-4 md:flex",
           showCart ? "hidden" : "flex",
         )}
       >
@@ -528,7 +543,7 @@ export default function NewSalePage() {
         <div
           className={cn(
             "min-w-0 flex-[2_1_20rem]",
-            showCart && "hidden lg:block",
+            showCart && "hidden md:block",
           )}
         >
           <PosFilterBar
@@ -550,7 +565,7 @@ export default function NewSalePage() {
           <div
             className={cn(
               "min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2",
-              showCart ? "hidden lg:block" : "",
+              showCart ? "hidden md:block" : "",
             )}
           >
             <PosVariantGrid
@@ -567,7 +582,7 @@ export default function NewSalePage() {
 
           {/* RIGHT — only the products added to the cart (the items scroll
               on their own) + the ONE order-discount input. */}
-          <aside className="hidden min-h-0 flex-1 flex-col gap-2 lg:flex">
+          <aside className="hidden min-h-0 flex-1 flex-col gap-2 md:flex">
             <div className="min-h-0 flex-1 overflow-y-auto rounded-md border p-2">
               <PosCart
                 bare
@@ -588,7 +603,7 @@ export default function NewSalePage() {
           <div
             className={cn(
               showCart ? "flex" : "hidden",
-              "h-full min-h-0 flex-1 flex-col overflow-hidden lg:hidden",
+              "h-full min-h-0 flex-1 flex-col overflow-hidden md:hidden",
             )}
           >
             {/* Only this area scrolls. */}
@@ -633,14 +648,14 @@ export default function NewSalePage() {
       </section>
       <div
         aria-hidden="true"
-        className="h-[calc(4rem+env(safe-area-inset-bottom))] shrink-0 lg:hidden"
+        className="h-[calc(4rem+env(safe-area-inset-bottom))] shrink-0 md:hidden"
       />
       {/* FOOTER — desktop: left Home / Reset / Refresh + Subtotal, right
           Total Payable + Pay Now. Phone keeps navigation and Pay Now always
           reachable; Cart toggles the cart section on the same page. */}
-      <footer className="hidden shrink-0 border-t bg-background px-4 py-2 lg:block">
+      <footer className="hidden shrink-0 border-t bg-background px-4 py-2 md:block">
         {/* Desktop bar — unchanged. */}
-        <div className="hidden items-center gap-2 lg:flex">
+        <div className="hidden items-center gap-2 md:flex">
           <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
             <Link
               href="/dashboard"

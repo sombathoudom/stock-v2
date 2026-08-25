@@ -1,7 +1,12 @@
 "use client";
 
-import { DashboardSquare01Icon } from "@hugeicons/core-free-icons";
+import {
+  DashboardSquare01Icon,
+  Settings01Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { useQuery } from "convex/react";
+import Link from "next/link";
 import { useSyncExternalStore } from "react";
 
 import { api } from "@convex/_generated/api";
@@ -18,6 +23,7 @@ import { StockValueCard } from "@/components/features/dashboard/stock-value-card
 import { TopCustomersCard } from "@/components/features/dashboard/top-customers-card";
 import { TopProductsCard } from "@/components/features/dashboard/top-products-card";
 import { PageToolbar } from "@/components/features/shell/page-toolbar";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { usePersistentState } from "@/hooks/use-persistent-state";
@@ -81,6 +87,35 @@ export default function DashboardPage() {
             ))}
           </div>
           <Skeleton className="h-80 w-full" />
+        </div>
+      </div>
+    );
+  }
+
+  if (overview === null) {
+    // Fresh signup — the shop row doesn't exist yet. A friendly setup prompt
+    // instead of the NO_SHOP crash.
+    const dashLabels = t().dashboard;
+    return (
+      <div className="flex w-full flex-col">
+        <PageToolbar icon={DashboardSquare01Icon} title={greeting} />
+        <div className="p-4">
+          <div className="flex max-w-md flex-col items-start gap-3 rounded-lg border bg-card p-6">
+            <span className="text-base font-semibold">
+              {dashLabels.setupTitle}
+            </span>
+            <p className="text-sm text-muted-foreground">
+              {dashLabels.setupBody}
+            </p>
+            <Link href="/settings" className={buttonVariants()}>
+              <HugeiconsIcon
+                icon={Settings01Icon}
+                strokeWidth={2}
+                className="size-4"
+              />
+              {dashLabels.setupCta}
+            </Link>
+          </div>
         </div>
       </div>
     );

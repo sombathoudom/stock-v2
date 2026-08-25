@@ -10,7 +10,7 @@ import { usePersistentState } from "@/hooks/use-persistent-state";
 /** One cart line. price/label/stock are display snapshots from the grid — the
  *  server re-reads price and re-checks stock at checkout. */
 export type CartLine = {
-  /** Unique per add — lines are never merged across adds. */
+  /** Stable identity for cart editing. */
   key: string;
   variantId: string;
   label: string;
@@ -29,9 +29,7 @@ export type CartLine = {
  *  carts were deduped by variant, so the fallback stays unique too. */
 export const cartLineId = (line: CartLine) => line.key ?? line.variantId;
 
-/** Append one add as its own line when the variant's aggregate quantity fits
- * the stock snapshot. The caller supplies the key so this projection stays
- * deterministic and easy to test. */
+/** Add a variant or increase its existing line when the total fits stock. */
 export function addCartLine(
   current: CartLine[],
   line: Omit<CartLine, "key">,
@@ -45,16 +43,21 @@ export function addCartLine(
   );
 
   if (line.qty < 1 || variantQty + line.qty > stock) return current;
+  const existingIndex = current.findIndex(
+    (item) => item.variantId === line.variantId
+  );
+  if (existingIndex !== -1) {
+    return current.map((item, index) =>
+      index === existingIndex ? { ...item, qty: item.qty + line.qty } : item
+    );
+  }
   return [...current, { ...line, key }];
 }
 
 export function useCheckoutCart() {
   const [cart, setCart] = usePersistentState<CartLine[]>("pos:cart", []);
 
-  /** Add one variant (fast POS tap-to-add, qty 1). Every accepted tap creates
-   *  a separate line, while all lines for the variant share one stock cap.
-   *  Legacy persisted lines without a snapshot remain unclamped; checkout
-   *  still re-checks real ledger stock server-side. */
+  /** Add one variant (fast POS tap-to-add, qty 1), merging repeat taps. */
   const addVariant = useCallback(
     (line: Omit<CartLine, "key">) => {
       setCart((current) => addCartLine(current, line, crypto.randomUUID()));

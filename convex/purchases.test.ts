@@ -83,6 +83,7 @@ async function seed(t: ReturnType<typeof convexTest>) {
       userId,
       supplierId,
       inactiveSupplierId,
+      productId,
       variantM,
       variantL,
       inactiveVariant,
@@ -278,6 +279,28 @@ describe("purchases.create", () => {
     });
     const row = list.page.find((entry) => entry.purchase._id === purchase._id);
     expect(row?.totalCost).toBe(2 * 600 + 125 + 75);
+  });
+
+  test("different receipt costs never change the catalog sale price", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(ids.variantM, { price: 600 });
+    });
+
+    await createPurchase(t, ids, {
+      lines: [{ variantId: ids.variantM, qty: 5, unitCost: 400 }],
+    });
+    await createPurchase(t, ids, {
+      lines: [{ variantId: ids.variantM, qty: 5, unitCost: 650 }],
+    });
+
+    const catalog = await t.run(async (ctx) => ({
+      product: await ctx.db.get(ids.productId),
+      variant: await ctx.db.get(ids.variantM),
+    }));
+    expect(catalog.product?.defaultPrice).toBe(1500);
+    expect(catalog.variant?.price).toBe(600);
   });
 
   test("rejects inactive suppliers and inactive variants", async () => {

@@ -26,13 +26,11 @@ import {
 } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { centsToInput, formatMoney, imageUrl, inputToCents, t } from "@/lib/utils";
+import { centsToInput, imageUrl, inputToCents, t } from "@/lib/utils";
 
 // One purchase line as built by the bulk entry and kept by the form.
 // `key` is a client-side identity (purchaseItemId or `new-<uuid>`) — the
-// server only ever sees purchaseItemId / variantId / qty / unitCost / price.
-// `price` is the sale price to SET on the variant (omitted = keep current);
-// `currentPrice` is the effective price at load, for the "→ $X" diff display.
+// server only ever sees purchaseItemId / variantId / qty / unitCost.
 export type PurchaseLine = {
   key: string;
   purchaseItemId?: Id<"purchaseItems">;
@@ -42,8 +40,6 @@ export type PurchaseLine = {
   color?: string;
   qty: number;
   unitCost: number; // integer cents
-  price?: number; // integer cents
-  currentPrice: number; // integer cents
 };
 
 export type LineDraft = Omit<PurchaseLine, "key">;
@@ -53,29 +49,25 @@ type RowState = {
   variant: Doc<"productVariants">;
   qtyStr: string;
   costStr: string;
-  priceStr: string;
-  currentPrice: number; // effective price when the grid loaded
 };
 
 /**
  * T5 bulk line entry (AGENTS.md: "qty 10 for all sizes" in one tap). Pick a
  * product (the search shows image + name), and EVERY active variant becomes
- * a row — one per size × color combo. A bulk bar copies one qty / unit cost /
- * sale price to all rows at once; every cell stays editable individually.
+ * a row — one per size × color combo. A bulk bar copies one qty / unit cost
+ * to all rows at once; every cell stays editable individually.
  * Rows with qty ≥ 1 become drafts on Save. The parent remounts this with a
  * per-product key in edit mode so internal state re-initializes cleanly
  * between "add" and "edit" sessions.
  */
 export function BulkLineEntry({
   lines,
-  currency,
   editLine,
   onCancelEdit,
   onSubmitLines,
 }: {
   /** Existing purchase lines — preloads values for variants already added. */
   lines: PurchaseLine[];
-  currency: string;
   /** Present = edit mode (preloads product + values); undefined = add mode. */
   editLine?: PurchaseLine;
   onCancelEdit?: () => void;
@@ -92,7 +84,6 @@ export function BulkLineEntry({
   // Bulk bar — one value each; only NON-EMPTY fields get copied to all rows.
   const [bulkQty, setBulkQty] = useState("");
   const [bulkCost, setBulkCost] = useState("");
-  const [bulkPrice, setBulkPrice] = useState("");
 
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -150,7 +141,6 @@ export function BulkLineEntry({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setRows(
       [...active, ...inactive].map((v) => {
-        const currentPrice = v.price ?? product.defaultPrice;
         const existing = lines.find((l) => l.variantId === v._id);
         const edited = editLine?.variantId === v._id ? editLine : undefined;
         const source = edited ?? existing;
@@ -160,11 +150,6 @@ export function BulkLineEntry({
           costStr: source
             ? centsToInput(source.unitCost)
             : centsToInput(v.cost ?? product.defaultCost),
-          priceStr:
-            source && source.price !== undefined
-              ? centsToInput(source.price)
-              : centsToInput(currentPrice),
-          currentPrice,
         };
       })
     );
@@ -180,19 +165,17 @@ export function BulkLineEntry({
   function applyToAll() {
     const qty = /^\d{1,6}$/.test(bulkQty.trim()) ? bulkQty.trim() : null;
     const cost = inputToCents(bulkCost);
-    const price = inputToCents(bulkPrice);
     setRows((rs) =>
       rs.map((r) => ({
         ...r,
         qtyStr: qty ?? r.qtyStr,
         costStr: cost != null ? bulkCost.trim() : r.costStr,
-        priceStr: price != null ? bulkPrice.trim() : r.priceStr,
       }))
     );
   }
 
-  // Parse every row: rows with qty ≥ 1 must have a valid cost and (when
-  // filled) a valid sale price; anything malformed blocks the whole save
+  // Parse every row: rows with qty ≥ 1 must have a valid cost; anything
+  // malformed blocks the whole save
   // (AGENTS.md: no silent failures).
   const { drafts, invalid } = useMemo(() => {
     const out: LineDraft[] = [];
@@ -205,10 +188,7 @@ export function BulkLineEntry({
       const qtyValid = qtyNum != null && qtyNum >= 1 && qtyNum <= 1_000_000;
       const costNum = inputToCents(r.costStr);
       const costValid = costNum != null && costNum >= 0;
-      const priceNum = inputToCents(r.priceStr);
-      const priceValid =
-        r.priceStr.trim() === "" || (priceNum != null && priceNum >= 0);
-      if (!qtyValid || !costValid || !priceValid) {
+      if (!qtyValid || !costValid) {
         bad = true;
         continue;
       }
@@ -224,11 +204,6 @@ export function BulkLineEntry({
         color: r.variant.color,
         qty: qtyNum!,
         unitCost: costNum!,
-        // Only emit a price change — the same value as the current price
-        // is a no-op the server skips anyway, but never sending it keeps
-        // the payload honest.
-        ...(priceNum != null && priceNum !== r.currentPrice ? { price: priceNum } : {}),
-        currentPrice: r.currentPrice,
       });
     }
     return { drafts: out, invalid: bad };
@@ -323,7 +298,7 @@ export function BulkLineEntry({
             {/* Bulk bar — type once, apply to all sizes. */}
             <div className="grid gap-2 rounded-md border p-3">
               <p className="text-sm font-medium">{t().purchases.applyToAll}</p>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <div className="grid gap-1">
                   <Label htmlFor="bulk-qty" className="text-xs text-muted-foreground">
                     {t().purchases.qty}
@@ -350,19 +325,6 @@ export function BulkLineEntry({
                     onChange={(e) => setBulkCost(e.target.value)}
                   />
                 </div>
-                <div className="grid gap-1">
-                  <Label htmlFor="bulk-price" className="text-xs text-muted-foreground">
-                    {t().purchases.salePrice}
-                  </Label>
-                  <Input
-                    id="bulk-price"
-                    className="h-11 md:h-9"
-                    inputMode="decimal"
-                    placeholder="0.00"
-                    value={bulkPrice}
-                    onChange={(e) => setBulkPrice(e.target.value)}
-                  />
-                </div>
               </div>
               <Button
                 type="button"
@@ -370,7 +332,7 @@ export function BulkLineEntry({
                 className="w-full sm:w-fit"
                 onClick={applyToAll}
                 disabled={
-                  bulkQty.trim() === "" && bulkCost.trim() === "" && bulkPrice.trim() === ""
+                  bulkQty.trim() === "" && bulkCost.trim() === ""
                 }
               >
                 {t().purchases.applyToAll}
@@ -379,21 +341,18 @@ export function BulkLineEntry({
 
             {/* Desktop: one bordered table-like grid, one row per variant. */}
             <div className="hidden overflow-hidden rounded-md border md:block">
-              <div className="grid grid-cols-[minmax(0,1fr)_5rem_7rem_7rem] items-center gap-2 border-b bg-muted/50 px-3 py-2 text-sm font-medium">
+              <div className="grid grid-cols-[minmax(0,1fr)_5rem_7rem] items-center gap-2 border-b bg-muted/50 px-3 py-2 text-sm font-medium">
                 <span>{t().purchases.size}</span>
                 <span className="text-right">{t().purchases.qty}</span>
                 <span className="text-right">{t().purchases.unitCost}</span>
-                <span className="text-right">{t().purchases.salePrice}</span>
               </div>
               {rows.map((r, i) => (
                 <BulkRow
                   key={r.variant._id}
                   row={r}
-                  currency={currency}
                   border={i < rows.length - 1}
                   onQty={(v) => setRow(setRows, r.variant._id, { qtyStr: v })}
                   onCost={(v) => setRow(setRows, r.variant._id, { costStr: v })}
-                  onPrice={(v) => setRow(setRows, r.variant._id, { priceStr: v })}
                 />
               ))}
             </div>
@@ -408,7 +367,7 @@ export function BulkLineEntry({
                         ? `${r.variant.size} · ${r.variant.color}`
                         : r.variant.size}
                     </p>
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       <CellInput
                         label={t().purchases.qty}
                         inputMode="numeric"
@@ -424,15 +383,6 @@ export function BulkLineEntry({
                         onChange={(v) =>
                           setRow(setRows, r.variant._id, { costStr: v })
                         }
-                      />
-                      <CellInput
-                        label={t().purchases.salePrice}
-                        inputMode="decimal"
-                        value={r.priceStr}
-                        onChange={(v) =>
-                          setRow(setRows, r.variant._id, { priceStr: v })
-                        }
-                        diff={priceDiff(r, currency)}
                       />
                     </div>
                   </CardContent>
@@ -474,32 +424,28 @@ export function BulkLineEntry({
 function setRow(
   setRows: (updater: (rs: RowState[]) => RowState[]) => void,
   variantId: Id<"productVariants">,
-  patch: Partial<Pick<RowState, "qtyStr" | "costStr" | "priceStr">>
+  patch: Partial<Pick<RowState, "qtyStr" | "costStr">>
 ) {
   setRows((rs) =>
     rs.map((r) => (r.variant._id === variantId ? { ...r, ...patch } : r))
   );
 }
 
-/** One desktop grid row: size label + qty / cost / sale-price inputs. */
+/** One desktop grid row: size label + quantity and cost inputs. */
 function BulkRow({
   row,
-  currency,
   border,
   onQty,
   onCost,
-  onPrice,
 }: {
   row: RowState;
-  currency: string;
   border: boolean;
   onQty: (value: string) => void;
   onCost: (value: string) => void;
-  onPrice: (value: string) => void;
 }) {
   return (
     <div
-      className={`grid grid-cols-[minmax(0,1fr)_5rem_7rem_7rem] items-center gap-2 px-3 py-2 ${
+      className={`grid grid-cols-[minmax(0,1fr)_5rem_7rem] items-center gap-2 px-3 py-2 ${
         border ? "border-b" : ""
       }`}
     >
@@ -518,30 +464,21 @@ function BulkRow({
         value={row.costStr}
         onChange={onCost}
       />
-      <CellInput
-        label={t().purchases.salePrice}
-        inputMode="decimal"
-        value={row.priceStr}
-        onChange={onPrice}
-        diff={priceDiff(row, currency)}
-      />
     </div>
   );
 }
 
-/** A 44px-tall numeric cell input with a small "→ $X" diff hint under it. */
+/** A 44px-tall numeric cell input. */
 function CellInput({
   label,
   inputMode,
   value,
   onChange,
-  diff,
 }: {
   label: string;
   inputMode: "numeric" | "decimal";
   value: string;
   onChange: (value: string) => void;
-  diff?: string;
 }) {
   return (
     <div className="grid gap-0.5">
@@ -552,18 +489,6 @@ function CellInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
-      {diff && (
-        <span className="truncate text-right text-[11px] tabular-nums text-muted-foreground">
-          {diff}
-        </span>
-      )}
     </div>
   );
-}
-
-/** "→ $X" when the typed sale price differs from the current price. */
-function priceDiff(row: RowState, currency: string): string | undefined {
-  const price = inputToCents(row.priceStr);
-  if (price == null || price === row.currentPrice) return undefined;
-  return `→ ${formatMoney(price, currency)}`;
 }

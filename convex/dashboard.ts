@@ -1,8 +1,9 @@
 import type { Infer } from "convex/values";
+import { v } from "convex/values";
 
 import type { Doc, Id } from "./_generated/dataModel";
 import { query } from "./_generated/server";
-import { dayString, getShop, requireUser } from "./helpers";
+import { dayString, requireUser } from "./helpers";
 import { collectLowStock } from "./lowStock";
 import { computePl } from "./reports";
 import {
@@ -78,10 +79,13 @@ function monthKeys(from: string, today: string): string[] {
 
 export const getOverview = query({
   args: { range: dashboardRange },
-  returns: dashboardOverview,
+  // null = the shop isn't set up yet (fresh signup, owner hasn't finished
+  // Settings) — a setup prompt on the client instead of a NO_SHOP crash.
+  returns: v.union(dashboardOverview, v.null()),
   handler: async (ctx, args) => {
     await requireUser(ctx);
-    const shop = await getShop(ctx);
+    const shop = await ctx.db.query("shop").first();
+    if (!shop) return null;
     const tz = shop.timezone;
     const today = dayString(Date.now(), tz);
     const kpi = kpiWindow(today, args.range);

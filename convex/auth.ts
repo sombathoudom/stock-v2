@@ -15,10 +15,18 @@ export const authComponent = createClient<DataModel>(components.betterAuth);
 
 export const createAuth = (ctx: GenericCtx<DataModel>) =>
   betterAuth({
+    trustedOrigins: [siteUrl, "http://localhost:3000"],
     baseURL: siteUrl,
     database: authComponent.adapter(ctx),
     // Configure simple, non-verified email/password.
     // Set requireEmailVerification to true once email sending is configured.
+    session: {
+      cookieCache: {
+        enabled: true,
+        maxAge: 60 * 60, // Cache session for 1hours
+      },
+    },
+
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,

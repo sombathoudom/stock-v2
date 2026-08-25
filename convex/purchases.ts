@@ -24,10 +24,9 @@ import {
 // Purchases stay editable at any time: editing a received purchase rewrites
 // its ledger rows (clear + fresh) whenever qty/membership/arrival changed, so
 // stock — a pure aggregation — corrects itself; unit-cost-only edits touch
-// no ledger rows. The per-line sale price written during the purchase is
-// applied to the variant (or removed when it follows the product default
-// again) inside the same transaction — the server never trusts the client.
-// The server re-validates everything (qty/cost/price bounds, line ownership,
+// no ledger rows. Purchase costs stay on their receipt lines and never change
+// the catalog sale price.
+// The server re-validates everything (qty/cost bounds, line ownership,
 // duplicate variants, variant/supplier existence) and never trusts the client.
 
 const NOTES_MAX = 2000;
@@ -66,12 +65,11 @@ type LineInput = {
   variantId: Id<"productVariants">;
   qty: number;
   unitCost: number;
-  price?: number;
 };
 
 /**
- * Bounds + variant existence for the raw line payloads. qty ≥ 1, unit cost
- * and price are bounded integers (assertQty/assertCents reject NaN/Infinity/
+ * Bounds + variant existence for the raw line payloads. qty ≥ 1 and unit cost
+ * are bounded integers (assertQty/assertCents reject NaN/Infinity/
  * out-of-range). A variantId may appear only ONCE across the whole payload —
  * the same size twice is a form bug, not a bulk-apply. New lines must point
  * at an active variant; existing lines only need the variant to exist (their
@@ -81,11 +79,10 @@ type LineInput = {
 async function validateLineValues(
   ctx: MutationCtx,
   lines: LineInput[]
-): Promise<{ lines: LineInput[]; variantById: Map<Id<"productVariants">, Doc<"productVariants">> }> {
+): Promise<LineInput[]> {
   if (lines.length === 0 || lines.length > LINES_MAX) invalid();
   const seen = new Set<Id<"productVariants">>();
   const out: LineInput[] = [];
-  const variantById = new Map<Id<"productVariants">, Doc<"productVariants">>();
   for (const line of lines) {
     if (seen.has(line.variantId)) {
       throw new ConvexError({
@@ -99,12 +96,6 @@ async function validateLineValues(
     if (unitCost < 0) {
       throw new ConvexError({ code: "INVALID_MONEY", message: "Cost can't be negative." });
     }
-    if (line.price !== undefined) {
-      const price = assertCents(line.price, "price");
-      if (price < 0) {
-        throw new ConvexError({ code: "INVALID_MONEY", message: "Price can't be negative." });
-      }
-    }
     const variant = await ctx.db.get(line.variantId);
     if (!variant) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Item not found." });
@@ -115,10 +106,9 @@ async function validateLineValues(
         message: "That size is no longer active.",
       });
     }
-    variantById.set(line.variantId, variant);
     out.push({ ...line, qty, unitCost });
   }
-  return { lines: out, variantById };
+  return out;
 }
 
 /**
@@ -234,40 +224,6 @@ async function assertRewriteKeepsStockNonnegative(
   }
 }
 
-/**
- * Apply the sale price written during the purchase to each variant that has
- * one: if it differs from the variant's current effective price (override or
- * product default), store it as an override — or REMOVE the override when the
- * new price equals the product default again (the variant follows defaults).
- * Runs inline in the caller's transaction; never calls another mutation.
- */
-async function applySalePrices(
-  ctx: MutationCtx,
-  lines: LineInput[],
-  variantById: Map<Id<"productVariants">, Doc<"productVariants">>
-) {
-  const productById = new Map<Id<"products">, Doc<"products">>();
-  for (const line of lines) {
-    if (line.price === undefined) continue;
-    const variant = variantById.get(line.variantId)!;
-    let product = productById.get(variant.productId);
-    if (product === undefined) {
-      const loaded = await ctx.db.get(variant.productId);
-      if (!loaded) continue; // defensive — nothing is hard-deleted
-      productById.set(variant.productId, loaded);
-      product = loaded;
-    }
-    const effective = variant.price ?? product.defaultPrice;
-    if (line.price !== effective) {
-      if (line.price === product.defaultPrice) {
-        await ctx.db.patch(variant._id, { price: undefined }); // follows defaults again
-      } else {
-        await ctx.db.patch(variant._id, { price: line.price });
-      }
-    }
-  }
-}
-
 // A purchase is created with its business date and — when the goods have
 // already arrived — its arrival date: a filled arrival date means received,
 // so the ledger rows are written right here (ts = arrival date) and stock is
@@ -287,7 +243,6 @@ export const create = mutation({
         variantId: v.id("productVariants"),
         qty: v.number(),
         unitCost: v.number(),
-        price: v.optional(v.number()),
       })
     ),
   },
@@ -344,7 +299,7 @@ export const create = mutation({
         throw new ConvexError({ code: "INVALID_MONEY", message: "Cost can't be negative." });
       }
     }
-    const { lines, variantById } = await validateLineValues(
+    const lines = await validateLineValues(
       ctx,
       args.lines.map((line) => ({ ...line, purchaseItemId: undefined }))
     );
@@ -374,7 +329,6 @@ export const create = mutation({
         await writeLineLedger(ctx, purchase, line.variantId, itemId, line.qty, staff._id, receivedAt);
       }
     }
-    await applySalePrices(ctx, lines, variantById);
     await recordIdempotency(
       ctx,
       staff._id,
@@ -410,7 +364,6 @@ export const update = mutation({
         variantId: v.id("productVariants"),
         qty: v.number(),
         unitCost: v.number(),
-        price: v.optional(v.number()),
       })
     ),
   },
@@ -484,7 +437,7 @@ export const update = mutation({
     // Duplicate-variantId rejection covers the FULL final set: kept lines
     // carry their variantId in the payload, so new lines can't collide with
     // each other or with kept items.
-    const { lines, variantById } = await validateLineValues(ctx, args.lines);
+    const lines = await validateLineValues(ctx, args.lines);
 
     // Reconcile items. No per-line ledger writes here — the ledger is
     // rewritten below in one shot when anything stock-relevant changed.
@@ -552,9 +505,6 @@ export const update = mutation({
         }
       }
     }
-
-    // Sale prices apply on save — drafts and received alike.
-    await applySalePrices(ctx, lines, variantById);
 
     await ctx.db.patch(args.purchaseId, {
       supplierId: args.supplierId,
