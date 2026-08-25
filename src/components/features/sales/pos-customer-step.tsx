@@ -7,18 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@convex/_generated/api";
-import type { Doc, Id } from "@convex/_generated/dataModel";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
+import type { Doc } from "@convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -44,12 +33,8 @@ import { t, toastError } from "@/lib/utils";
 
 // T10 — POS customer step (AGENTS.md, checkout step ②). The combobox search
 // is SERVER-side (api.customers.listActive, name/phone prefix, debounced).
-// The New-customer dialog reuses the T7 dedupe flow: a DUPLICATE_CUSTOMER
-// rejection offers "Use existing" (selects the found customer) or "Create
-// anyway" (retry with forceCreate). The server enforces phone uniqueness
-// regardless — the prompt here is UX for choosing which record to use.
-
-type DuplicateInfo = { customerId: string; name: string; phone: string };
+// New-customer creation atomically reuses an existing normalized phone, so a
+// repeat entry selects that customer instead of creating another record.
 
 export function PosCustomerStep({
   customerId,
@@ -90,37 +75,26 @@ export function PosCustomerStep({
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
   const [creating, setCreating] = useState(false);
-  const create = useMutation(api.customers.create);
+  const createOrGet = useMutation(api.customers.createOrGetByPhone);
 
-  // --- Duplicate alert: resolve the existing row so "Use existing" can
-  // hand a full Doc back to the page. ---
-  const [dupId, setDupId] = useState<string | null>(null);
-  const dupCustomer = useQuery(
-    api.customers.get,
-    user == null || dupId === null
-      ? "skip"
-      : { customerId: dupId as Id<"customers"> }
-  );
-
-  async function doCreate(force: boolean) {
+  async function doCreate() {
     setCreating(true);
     try {
-      const created = await create({
+      const result = await createOrGet({
         name,
         phone: phone.trim() || undefined,
         address: address.trim() || undefined,
-        forceCreate: force || undefined,
       });
-      toast.success(t().customers.created);
+      toast.success(
+        result.created ? t().customers.created : t().customers.existingSelected
+      );
       setNewOpen(false);
       setName("");
       setPhone("");
       setAddress("");
-      onSelect(created);
+      onSelect(result.customer);
     } catch (err) {
-      const info = duplicateInfoOf(err);
-      if (info) setDupId(info.customerId);
-      else toastError(err);
+      toastError(err);
     } finally {
       setCreating(false);
     }
@@ -236,7 +210,7 @@ export function PosCustomerStep({
             <Button
               type="button"
               disabled={creating || !name.trim()}
-              onClick={() => void doCreate(false)}
+              onClick={() => void doCreate()}
             >
               {t().common.save}
             </Button>
@@ -253,83 +227,6 @@ export function PosCustomerStep({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog
-        open={dupId !== null}
-        onOpenChange={(open) => {
-          if (!open) setDupId(null);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t().customers.duplicateTitle}</AlertDialogTitle>
-            <AlertDialogDescription>
-              <span className="flex flex-col gap-1">
-                <span>{t().customers.duplicateBody}</span>
-                {dupCustomer && (
-                  <Badge variant="secondary" className="w-fit gap-1">
-                    {dupCustomer.name}
-                    {dupCustomer.phone ? ` · ${dupCustomer.phone}` : ""}
-                  </Badge>
-                )}
-              </span>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>
-              <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
-              {t().common.cancel}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                const existing = dupCustomer;
-                setDupId(null);
-                if (existing) {
-                  setNewOpen(false);
-                  setName("");
-                  setPhone("");
-                  setAddress("");
-                  onSelect(existing);
-                }
-              }}
-            >
-              {t().customers.useExisting}
-            </AlertDialogAction>
-            <Button
-              type="button"
-              onClick={() => {
-                setDupId(null);
-                void doCreate(true);
-              }}
-            >
-              {t().customers.createAnyway}
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </>
   );
-}
-
-/** Extract the duplicate payload from a DUPLICATE_CUSTOMER ConvexError. */
-function duplicateInfoOf(err: unknown): DuplicateInfo | null {
-  if (
-    err instanceof Error &&
-    "data" in err &&
-    typeof (err as { data?: unknown }).data === "object" &&
-    (err as { data: { code?: string } }).data?.code === "DUPLICATE_CUSTOMER"
-  ) {
-    const d = (
-      err as {
-        data: { customerId?: string; customerName?: string; customerPhone?: string };
-      }
-    ).data;
-    if (d.customerId) {
-      return {
-        customerId: d.customerId,
-        name: d.customerName ?? "",
-        phone: d.customerPhone ?? "",
-      };
-    }
-  }
-  return null;
 }

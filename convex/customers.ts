@@ -8,10 +8,9 @@ import { customerDoc } from "./types";
 
 // T7 — Customers (AGENTS.md). Phone is the dedupe key: stored normalized
 // (digits only, no leading zeros) and uniqueness is ENFORCED SERVER-SIDE —
-// the frontend banner is UX only. Duplicate phones throw DUPLICATE_CUSTOMER
-// unless the caller explicitly force-creates.
+// the frontend banner is UX only. Duplicate phones cannot be force-created.
 
-/** "012 345 678" / "+855 (12) 345-678" → "12345678". */
+/** Remove formatting and local leading zeros: "012 345 678" → "12345678". */
 export function normalizePhone(input: string): string {
   return input.replace(/[^0-9]/g, "").replace(/^0+/, "");
 }
@@ -63,43 +62,80 @@ async function findDuplicate(
   return null;
 }
 
+async function insertCustomer(
+  ctx: MutationCtx,
+  values: {
+    name: string;
+    phone: string | undefined;
+    address: string | undefined;
+    notes: string | undefined;
+  }
+) {
+  const id = await ctx.db.insert("customers", {
+    name: values.name,
+    nameLower: values.name.toLowerCase(),
+    phone: values.phone ?? "",
+    address: values.address,
+    notes: values.notes,
+    active: true,
+  });
+  return (await ctx.db.get(id))!;
+}
+
 export const create = mutation({
   args: {
     name: v.string(),
     phone: v.optional(v.string()),
     address: v.optional(v.string()),
     notes: v.optional(v.string()),
-    // The UI asks before re-creating a known phone; only pass true when the
-    // owner explicitly chose "Create anyway".
-    forceCreate: v.optional(v.boolean()),
   },
   returns: customerDoc,
   handler: async (ctx, args) => {
     await requireUser(ctx);
     const name = cleanName(args.name);
     const phone = cleanPhone(args.phone);
-    if (!args.forceCreate) {
-      const duplicate = await findDuplicate(ctx, phone);
-      if (duplicate) {
-        throw new ConvexError({
-          code: "DUPLICATE_CUSTOMER",
-          message: "A customer with this phone already exists.",
-          // Extra payload for the "Use existing / Create anyway" prompt.
-          customerId: duplicate._id,
-          customerName: duplicate.name,
-          customerPhone: duplicate.phone,
-        });
-      }
+    const duplicate = await findDuplicate(ctx, phone);
+    if (duplicate) {
+      throw new ConvexError({
+        code: "DUPLICATE_CUSTOMER",
+        message: "A customer with this phone already exists.",
+        customerId: duplicate._id,
+        customerName: duplicate.name,
+        customerPhone: duplicate.phone,
+      });
     }
-    const id = await ctx.db.insert("customers", {
+    return await insertCustomer(ctx, {
       name,
-      nameLower: name.toLowerCase(),
-      phone: phone ?? "",
+      phone,
       address: cleanOptional(args.address, 300),
       notes: cleanOptional(args.notes, 2000),
-      active: true,
     });
-    return (await ctx.db.get(id))!;
+  },
+});
+
+// POS creation is atomic: an existing normalized phone is returned and used
+// for the sale; otherwise exactly one new customer is inserted.
+export const createOrGetByPhone = mutation({
+  args: {
+    name: v.string(),
+    phone: v.optional(v.string()),
+    address: v.optional(v.string()),
+    notes: v.optional(v.string()),
+  },
+  returns: v.object({ customer: customerDoc, created: v.boolean() }),
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    const name = cleanName(args.name);
+    const phone = cleanPhone(args.phone);
+    const duplicate = await findDuplicate(ctx, phone);
+    if (duplicate) return { customer: duplicate, created: false };
+    const customer = await insertCustomer(ctx, {
+      name,
+      phone,
+      address: cleanOptional(args.address, 300),
+      notes: cleanOptional(args.notes, 2000),
+    });
+    return { customer, created: true };
   },
 });
 
@@ -112,7 +148,6 @@ export const update = mutation({
     address: v.optional(v.string()),
     notes: v.optional(v.string()),
     active: v.boolean(),
-    forceCreate: v.optional(v.boolean()),
   },
   returns: customerDoc,
   handler: async (ctx, args) => {
@@ -125,18 +160,15 @@ export const update = mutation({
     if (existing.active !== args.active) await requireOwner(ctx);
     const name = cleanName(args.name);
     const phone = cleanPhone(args.phone);
-    if (!args.forceCreate) {
-      const duplicate = await findDuplicate(ctx, phone, args.customerId);
-      if (duplicate) {
-        throw new ConvexError({
-          code: "DUPLICATE_CUSTOMER",
-          message: "A customer with this phone already exists.",
-          // Extra payload for the "Use existing / Create anyway" prompt.
-          customerId: duplicate._id,
-          customerName: duplicate.name,
-          customerPhone: duplicate.phone,
-        });
-      }
+    const duplicate = await findDuplicate(ctx, phone, args.customerId);
+    if (duplicate) {
+      throw new ConvexError({
+        code: "DUPLICATE_CUSTOMER",
+        message: "A customer with this phone already exists.",
+        customerId: duplicate._id,
+        customerName: duplicate.name,
+        customerPhone: duplicate.phone,
+      });
     }
     await ctx.db.patch(args.customerId, {
       name,
@@ -176,9 +208,13 @@ export const list = query({
   }),
   handler: async (ctx, args) => {
     await requireUser(ctx);
-    const term = args.search?.trim().toLowerCase() ?? "";
+    const rawTerm = args.search?.trim().toLowerCase() ?? "";
+    const phoneTerm = /^[+()0-9.\s-]+$/.test(rawTerm)
+      ? normalizePhone(rawTerm)
+      : "";
+    const term = phoneTerm || rawTerm;
     // Query builders are single-use — a factory keeps page + total separate.
-    const isPhoneSearch = /^[0-9]/.test(term);
+    const isPhoneSearch = phoneTerm.length > 0;
     const build = () =>
       isPhoneSearch
         ? ctx.db.query("customers").withIndex("by_phone", (q) =>
@@ -200,8 +236,12 @@ export const listActive = query({
   returns: v.array(customerDoc),
   handler: async (ctx, args) => {
     await requireUser(ctx);
-    const term = args.search?.trim().toLowerCase() ?? "";
-    const isPhoneSearch = /^[0-9]/.test(term);
+    const rawTerm = args.search?.trim().toLowerCase() ?? "";
+    const phoneTerm = /^[+()0-9.\s-]+$/.test(rawTerm)
+      ? normalizePhone(rawTerm)
+      : "";
+    const term = phoneTerm || rawTerm;
+    const isPhoneSearch = phoneTerm.length > 0;
     const build = () =>
       isPhoneSearch
         ? ctx.db.query("customers").withIndex("by_phone", (q) =>
@@ -217,8 +257,8 @@ export const listActive = query({
 
 // Dedupe lookup for the create form: an exact normalized-phone match or an
 // exact name match means "this customer probably already exists". The UI
-// shows these with "Use existing" / "Create anyway" options; the server
-// enforces the phone rule regardless.
+// shows these with a link to the existing record; the server enforces the
+// phone rule regardless.
 export const lookup = query({
   args: {
     phone: v.optional(v.string()),

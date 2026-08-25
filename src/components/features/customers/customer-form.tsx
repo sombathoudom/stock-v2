@@ -41,8 +41,8 @@ import { t, toastError } from "@/lib/utils";
 // One shared form for the create and edit customer pages. Dedupe (T7,
 // AGENTS.md rule #6): while typing, an exact phone/name match is looked up
 // and shown inline; on submit with matches present (or when the server
-// rejects a duplicate phone), an alert dialog offers "Use existing" /
-// "Create anyway". The server enforces phone uniqueness regardless.
+// rejects a duplicate phone), an alert links to the existing customer. The
+// server never permits a second record with the same normalized phone.
 
 const customerSchema = z.object({
   name: z.string().trim().min(1, "Required").max(100),
@@ -115,7 +115,7 @@ export function CustomerForm({
   // Exclude this customer in edit mode — its own phone is not a duplicate.
   const duplicates = (matches ?? []).filter((m) => m._id !== customer?._id);
 
-  async function submit(values: CustomerValues, force: boolean) {
+  async function submit(values: CustomerValues) {
     setSaving(true);
     try {
       const payload = {
@@ -129,11 +129,10 @@ export function CustomerForm({
           customerId: customer._id,
           ...payload,
           active: values.active,
-          forceCreate: force,
         });
         toast.success(t().customers.saved);
       } else {
-        await create({ ...payload, forceCreate: force });
+        await create(payload);
         toast.success(t().customers.created);
       }
       onDone();
@@ -150,19 +149,20 @@ export function CustomerForm({
     }
   }
 
-  function onSubmit(values: CustomerValues, force = false) {
-    // A live lookup found a match and the owner hasn't chosen yet: ask first
-    // ("pick existing or force-create" — the server enforces anyway).
-    if (!force && duplicates.length > 0) {
-      const first = duplicates[0];
+  function onSubmit(values: CustomerValues) {
+    const normalizedPhone = values.phone.replace(/[^0-9]/g, "").replace(/^0+/, "");
+    const phoneMatch = duplicates.find(
+      (match) => normalizedPhone.length > 0 && match.phone === normalizedPhone
+    );
+    if (phoneMatch) {
       setDuplicate({
-        customerId: first._id,
-        name: first.name,
-        phone: first.phone,
+        customerId: phoneMatch._id,
+        name: phoneMatch.name,
+        phone: phoneMatch.phone,
       });
       return;
     }
-    void submit(values, force);
+    void submit(values);
   }
 
   return (
@@ -259,7 +259,7 @@ export function CustomerForm({
         </Card>
       </form>
 
-      {/* The "already exists" prompt: pick the existing record or create anyway. */}
+      {/* A duplicate phone can only open the existing record. */}
       <AlertDialog
         open={duplicate !== null}
         onOpenChange={(open) => {
@@ -295,17 +295,6 @@ export function CustomerForm({
             >
               {t().customers.useExisting}
             </AlertDialogAction>
-            <Button
-              type="button"
-              onClick={() => {
-                setDuplicate(null);
-                // Explicit force=true — state updates are async, so passing
-                // it through handleSubmit avoids a stale-closure resubmit.
-                void form.handleSubmit((values) => onSubmit(values, true))();
-              }}
-            >
-              {t().customers.createAnyway}
-            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
