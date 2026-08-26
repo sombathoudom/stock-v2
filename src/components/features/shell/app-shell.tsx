@@ -1,7 +1,7 @@
 "use client";
 
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Logout01Icon, Store01Icon } from "@hugeicons/core-free-icons";
+import { ArrowDown01Icon, Logout01Icon, Store01Icon } from "@hugeicons/core-free-icons";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useQuery } from "convex/react";
@@ -59,6 +59,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const shop = useShop();
   const [collapsed, setCollapsed] = usePersistentState("shell:collapsed", false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Track which parent nav items are expanded (children visible).
+  const [expandedItems, setExpandedItems] = usePersistentState<Record<string, boolean>>(
+    "shell:expanded",
+    {},
+  );
+  function toggleExpanded(href: string) {
+    setExpandedItems((prev) => ({ ...prev, [href]: !prev[href] }));
+  }
   // Tablet (768–1023) shows the sidebar icon-only by default, expandable via
   // the same toggle. Desktop keeps the persisted preference; the tablet's
   // expand state is session-only so it never changes the desktop layout.
@@ -122,26 +130,87 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
           {items.map((item) => {
             const isStock = item.labelKey === "stock";
+            const hasChildren = item.children && item.children.length > 0;
+            const isExpanded = expandedItems[item.href] ?? false;
+            const childActive = hasChildren && item.children!.some((child) => isActive(pathname, child.href));
             return (
-              <Link
-                key={item.href}
-                href={item.href}
-                aria-current={isActive(pathname, item.href) ? "page" : undefined}
-                title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
-                className={cn(
-                  "relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                  isActive(pathname, item.href)
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  effectiveCollapsed && "justify-center px-0",
+              <div key={item.href}>
+                {hasChildren ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (effectiveCollapsed) return;
+                      toggleExpanded(item.href);
+                    }}
+                    title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
+                    className={cn(
+                      "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                      (isActive(pathname, item.href) || childActive)
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      effectiveCollapsed && "justify-center px-0",
+                    )}
+                  >
+                    <NavIcon item={item} />
+                    {!effectiveCollapsed && (
+                      <>
+                        <span className="truncate">{t().nav[item.labelKey]}</span>
+                        <HugeiconsIcon
+                          icon={ArrowDown01Icon}
+                          strokeWidth={2}
+                          className={cn(
+                            "ms-auto size-4 shrink-0 transition-transform",
+                            isExpanded && "rotate-180",
+                          )}
+                        />
+                      </>
+                    )}
+                    {isStock && lowCount > 0 && (
+                      <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
+                    )}
+                  </button>
+                ) : (
+                  <Link
+                    href={item.href}
+                    aria-current={isActive(pathname, item.href) ? "page" : undefined}
+                    title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
+                    className={cn(
+                      "relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                      isActive(pathname, item.href)
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      effectiveCollapsed && "justify-center px-0",
+                    )}
+                  >
+                    <NavIcon item={item} />
+                    {!effectiveCollapsed && <span className="truncate">{t().nav[item.labelKey]}</span>}
+                    {isStock && lowCount > 0 && (
+                      <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
+                    )}
+                  </Link>
                 )}
-              >
-                <NavIcon item={item} />
-                {!effectiveCollapsed && <span className="truncate">{t().nav[item.labelKey]}</span>}
-                {isStock && lowCount > 0 && (
-                  <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
+                {/* Sub-items: indented, only visible when expanded and not collapsed. */}
+                {hasChildren && isExpanded && !effectiveCollapsed && (
+                  <div className="ms-4 flex flex-col gap-0.5 border-s ps-3">
+                    {item.children!.map((child) => (
+                      <Link
+                        key={child.href}
+                        href={child.href}
+                        aria-current={isActive(pathname, child.href) ? "page" : undefined}
+                        className={cn(
+                          "flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors",
+                          isActive(pathname, child.href)
+                            ? "bg-primary/10 text-primary font-medium"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                      >
+                        <HugeiconsIcon icon={child.icon} strokeWidth={2} className="size-4 shrink-0" />
+                        <span className="truncate">{t().nav[child.labelKey]}</span>
+                      </Link>
+                    ))}
+                  </div>
                 )}
-              </Link>
+              </div>
             );
           })}
         </nav>
@@ -175,26 +244,78 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="truncate font-heading text-base font-semibold">{t().appName}</span>
           </div>
           <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
-            {items.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={() => setDrawerOpen(false)}
-                aria-current={isActive(pathname, item.href) ? "page" : undefined}
-                className={cn(
-                  "relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                  isActive(pathname, item.href)
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                <NavIcon item={item} />
-                <span className="truncate">{t().nav[item.labelKey]}</span>
-                {item.labelKey === "stock" && lowCount > 0 && (
-                  <LowStockBadge count={lowCount} overlay={false} />
-                )}
-              </Link>
-            ))}
+            {items.map((item) => {
+              const hasChildren = item.children && item.children.length > 0;
+              const isExpanded = expandedItems[item.href] ?? false;
+              const childActive = hasChildren && item.children!.some((child) => isActive(pathname, child.href));
+              return (
+                <div key={item.href}>
+                  {hasChildren ? (
+                    <button
+                      type="button"
+                      onClick={() => toggleExpanded(item.href)}
+                      className={cn(
+                        "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                        (isActive(pathname, item.href) || childActive)
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                    >
+                      <NavIcon item={item} />
+                      <span className="truncate">{t().nav[item.labelKey]}</span>
+                      <HugeiconsIcon
+                        icon={ArrowDown01Icon}
+                        strokeWidth={2}
+                        className={cn(
+                          "ms-auto size-4 shrink-0 transition-transform",
+                          isExpanded && "rotate-180",
+                        )}
+                      />
+                    </button>
+                  ) : (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setDrawerOpen(false)}
+                      aria-current={isActive(pathname, item.href) ? "page" : undefined}
+                      className={cn(
+                        "relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                        isActive(pathname, item.href)
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                    >
+                      <NavIcon item={item} />
+                      <span className="truncate">{t().nav[item.labelKey]}</span>
+                      {item.labelKey === "stock" && lowCount > 0 && (
+                        <LowStockBadge count={lowCount} overlay={false} />
+                      )}
+                    </Link>
+                  )}
+                  {hasChildren && isExpanded && (
+                    <div className="ms-4 flex flex-col gap-0.5 border-s ps-3">
+                      {item.children!.map((child) => (
+                        <Link
+                          key={child.href}
+                          href={child.href}
+                          onClick={() => setDrawerOpen(false)}
+                          aria-current={isActive(pathname, child.href) ? "page" : undefined}
+                          className={cn(
+                            "flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors",
+                            isActive(pathname, child.href)
+                              ? "bg-primary/10 text-primary font-medium"
+                              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                          )}
+                        >
+                          <HugeiconsIcon icon={child.icon} strokeWidth={2} className="size-4 shrink-0" />
+                          <span className="truncate">{t().nav[child.labelKey]}</span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </nav>
           <Separator />
           <div className="p-2">

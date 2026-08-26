@@ -7,9 +7,11 @@ import {
   BoxIcon,
   Calculator01Icon,
   ClipboardCheckIcon,
+  ClipboardIcon,
   Contact01Icon,
   DashboardSquare01Icon,
   DeliveryTruck01Icon,
+  FileUploadIcon,
   Link01Icon,
   PackageReceive01Icon,
   Settings01Icon,
@@ -39,6 +41,9 @@ export type NavItem = {
     | "expenses"
     | "reports"
     | "settings"
+    | "countStock"
+    | "importProducts"
+    | "openingStock"
     | "more";
   href: string;
   /** hugeicons icon data object — rendered through HugeiconsIcon. */
@@ -51,6 +56,8 @@ export type NavItem = {
   inBottomNav?: boolean;
   /** Only shown when the shop has the delivery module on (checked in the shell). */
   requiresDelivery?: boolean;
+  /** Optional sub-items rendered as an expandable group in the sidebar. */
+  children?: NavItem[];
 };
 
 /**
@@ -81,6 +88,26 @@ export const navItems: NavItem[] = [
     icon: Shirt01Icon,
     phase: 1,
     inBottomNav: true,
+    children: [
+      {
+        labelKey: "countStock",
+        href: "/products/count-stock",
+        icon: ClipboardIcon,
+        phase: 1,
+      },
+      {
+        labelKey: "importProducts",
+        href: "/products/import",
+        icon: FileUploadIcon,
+        phase: 1,
+      },
+      {
+        labelKey: "openingStock",
+        href: "/products/opening-stock",
+        icon: WarehouseIcon,
+        phase: 1,
+      },
+    ],
   },
   {
     labelKey: "categories",
@@ -160,4 +187,9 @@ export const navItems: NavItem[] = [
   },
 ];
 
-export const visibleNavItems = navItems.filter((item) => item.phase <= CURRENT_PHASE);
+export const visibleNavItems = navItems
+  .filter((item) => item.phase <= CURRENT_PHASE)
+  .map((item) => ({
+    ...item,
+    children: item.children?.filter((child) => child.phase <= CURRENT_PHASE),
+  }));

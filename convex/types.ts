@@ -663,6 +663,22 @@ export const stockCsvRow = v.object({
   price: v.number(), // integer cents
 });
 
+/** One count-stock row: a product with all its variants and computed stock,
+ * optionally filtered by category. Used for the stock count XLSX export. */
+export const countStockRow = v.object({
+  productName: v.string(),
+  categoryName: v.string(),
+  variants: v.array(
+    v.object({
+      size: v.string(),
+      color: v.optional(v.string()),
+      sku: v.optional(v.string()),
+      qty: v.number(),
+    })
+  ),
+  totalQty: v.number(),
+});
+
 /** One report CSV row: one day's cash-basis P/L line (same math as the
  * on-screen report — money counts on the day it is received). */
 export const reportCsvRow = v.object({

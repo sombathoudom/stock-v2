@@ -23,6 +23,7 @@ import type * as expenses from "../expenses.js";
 import type * as helpers from "../helpers.js";
 import type * as http from "../http.js";
 import type * as idempotency from "../idempotency.js";
+import type * as imports from "../imports.js";
 import type * as lowStock from "../lowStock.js";
 import type * as payments from "../payments.js";
 import type * as pos from "../pos.js";
@@ -59,6 +60,7 @@ declare const fullApi: ApiFromModules<{
   helpers: typeof helpers;
   http: typeof http;
   idempotency: typeof idempotency;
+  imports: typeof imports;
   lowStock: typeof lowStock;
   payments: typeof payments;
   pos: typeof pos;

@@ -7,7 +7,7 @@ import type { QueryCtx } from "./_generated/server";
 import { query } from "./_generated/server";
 import { getShop, requireUser } from "./helpers";
 import { dayRange } from "./sales";
-import { ledgerHistoryItem, ledgerRangeSummary, ledgerReason, stockCsvRow, stockListItem } from "./types";
+import { ledgerHistoryItem, ledgerRangeSummary, ledgerReason, stockCsvRow, stockListItem, countStockRow } from "./types";
 
 // T6 — Stock (AGENTS.md). Stock is NEVER a stored number: every read here
 // sums the immutable stockLedger rows (rule #1). The list walks the product
@@ -131,6 +131,82 @@ export const stockCsv = query({
           price: variant.price ?? product.defaultPrice,
         });
       }
+    }
+    return out;
+  },
+});
+
+// T-count-stock — Stock count with optional category filter: every active
+// variant with its computed stock, grouped by product. Used for the stock
+// count XLSX export. Same bounded product walk as stockCsv.
+export const countStock = query({
+  args: {
+    categoryId: v.optional(v.id("categories")),
+  },
+  returns: v.array(countStockRow),
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+
+    // Build the product query — with or without category filter.
+    const buildQuery = () => {
+      if (args.categoryId !== undefined) {
+        return ctx.db
+          .query("products")
+          .withIndex("by_category_nameLower", (q) =>
+            q.eq("categoryId", args.categoryId)
+          );
+      }
+      return ctx.db.query("products").withIndex("by_nameLower", (q) => q);
+    };
+
+    const products = await buildQuery().take(1000);
+
+    // Collect category names for the lookup.
+    const categoryIds = [
+      ...new Set(
+        products.map((p) => p.categoryId).filter((id): id is NonNullable<typeof id> => id !== undefined)
+      ),
+    ];
+    const categories = await Promise.all(
+      categoryIds.map((id) => ctx.db.get(id))
+    );
+    const categoryNameById = new Map(
+      categories.filter((c) => c !== null).map((c) => [c._id, c.name] as const)
+    );
+
+    const out: Infer<typeof countStockRow>[] = [];
+    for (const product of products) {
+      if (!product.active) continue;
+      const variants = await ctx.db
+        .query("productVariants")
+        .withIndex("by_product", (q) => q.eq("productId", product._id))
+        .collect();
+      const variantRows: {
+        size: string;
+        color?: string;
+        sku?: string;
+        qty: number;
+      }[] = [];
+      let totalQty = 0;
+      for (const variant of variants) {
+        if (!variant.active) continue;
+        const qty = await variantQty(ctx, variant._id);
+        variantRows.push({
+          size: variant.size,
+          ...(variant.color !== undefined ? { color: variant.color } : {}),
+          ...(variant.sku !== undefined ? { sku: variant.sku } : {}),
+          qty,
+        });
+        totalQty += qty;
+      }
+      out.push({
+        productName: product.name,
+        categoryName: product.categoryId
+          ? (categoryNameById.get(product.categoryId) ?? "—")
+          : "—",
+        variants: variantRows,
+        totalQty,
+      });
     }
     return out;
   },
