@@ -10,6 +10,8 @@ Set these in Dokploy → Your App → Environment Variables:
 ```bash
 # Required
 APP_URL=http://15.235.143.107:7000
+BETTER_AUTH_SECRET=your-super-secret-key-at-least-32-characters-long
+BETTER_AUTH_URL=http://15.235.143.107:7000
 NEXT_PUBLIC_CONVEX_URL=https://your-app.convex.cloud
 NEXT_PUBLIC_CONVEX_SITE_URL=https://your-app.convex.site
 APP_PORT=7000
@@ -21,11 +23,18 @@ Set these in Convex Dashboard → Settings → Environment Variables:
 ```bash
 # Required for authentication
 APP_URL=http://15.235.143.107:7000
+BETTER_AUTH_SECRET=your-super-secret-key-at-least-32-characters-long
 ```
 
 ## Complete Setup Checklist
 
-### Step 1: Get Convex URLs
+### Step 1: Generate Better Auth Secret
+Run this command to generate a secure secret:
+```bash
+openssl rand -base64 32
+```
+
+### Step 2: Get Convex URLs
 1. Go to [Convex Dashboard](https://dashboard.convex.dev)
 2. Select your project
 3. Go to Settings → URL
@@ -33,22 +42,25 @@ APP_URL=http://15.235.143.107:7000
    - `https://your-app.convex.cloud` (for NEXT_PUBLIC_CONVEX_URL)
    - `https://your-app.convex.site` (for NEXT_PUBLIC_CONVEX_SITE_URL)
 
-### Step 2: Set Convex Environment Variables
+### Step 3: Set Convex Environment Variables
 In Convex Dashboard → Settings → Environment Variables:
 ```
 APP_URL = http://15.235.143.107:7000
+BETTER_AUTH_SECRET = your-generated-secret
 ```
 
-### Step 3: Set Dokploy Environment Variables
+### Step 4: Set Dokploy Environment Variables
 In Dokploy → Your App → Environment Variables:
 ```
 APP_URL = http://15.235.143.107:7000
+BETTER_AUTH_SECRET = your-generated-secret
+BETTER_AUTH_URL = http://15.235.143.107:7000
 NEXT_PUBLIC_CONVEX_URL = https://your-app.convex.cloud
 NEXT_PUBLIC_CONVEX_SITE_URL = https://your-app.convex.site
 APP_PORT = 7000
 ```
 
-### Step 4: Deploy
+### Step 5: Deploy
 1. Push your code to GitHub
 2. In Dokploy, click "Deploy"
 3. Wait for build to complete
@@ -59,6 +71,8 @@ APP_PORT = 7000
 | Variable | Set In | Description | Example |
 |----------|--------|-------------|---------|
 | `APP_URL` | Both | Your app's public URL | `http://15.235.143.107:7000` |
+| `BETTER_AUTH_SECRET` | Both | Secret key for auth (min 32 chars) | `your-generated-secret` |
+| `BETTER_AUTH_URL` | Dokploy | Auth base URL | `http://15.235.143.107:7000` |
 | `NEXT_PUBLIC_CONVEX_URL` | Dokploy | Convex deployment URL | `https://my-app.convex.cloud` |
 | `NEXT_PUBLIC_CONVEX_SITE_URL` | Dokploy | Convex site URL | `https://my-app.convex.site` |
 | `APP_PORT` | Dokploy | Container port | `7000` |
@@ -68,6 +82,7 @@ APP_PORT = 7000
 ### 403 Forbidden Error
 - Check `APP_URL` is set in Convex Dashboard
 - Check `APP_URL` matches your actual URL in Dokploy
+- Check `BETTER_AUTH_SECRET` is set in both Dokploy and Convex
 - Ensure no trailing slash in URLs
 
 ### Build Fails
@@ -78,12 +93,15 @@ APP_PORT = 7000
 - Clear browser cookies
 - Check Convex environment variables
 - Verify `APP_URL` matches in both Dokploy and Convex
+- Verify `BETTER_AUTH_SECRET` is the same in both places
 
 ## Production Checklist
 
+- [ ] Generate Better Auth secret (`openssl rand -base64 32`)
 - [ ] Convex project created
 - [ ] Convex URLs copied
 - [ ] `APP_URL` set in Convex Dashboard
+- [ ] `BETTER_AUTH_SECRET` set in Convex Dashboard
 - [ ] Dokploy application created
 - [ ] All environment variables set in Dokploy
 - [ ] Domain/IP configured
