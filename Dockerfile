@@ -58,15 +58,15 @@ RUN chown -R nextjs:nodejs /app
 USER nextjs
 
 # Expose port
-EXPOSE 3000
+EXPOSE ${APP_PORT:-3000}
 
 # Set environment variables for runtime
-ENV PORT=3000
+ENV PORT=${APP_PORT:-3000}
 ENV HOSTNAME="0.0.0.0"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000 || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${APP_PORT:-3000} || exit 1
 
 # Start the application
 CMD ["node", "server.js"]
