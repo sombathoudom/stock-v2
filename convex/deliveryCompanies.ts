@@ -40,6 +40,7 @@ export const create = mutation({
     name: v.string(),
     phone: v.optional(v.string()),
     defaultFee: v.number(),
+    imageStorageId: v.optional(v.id("_storage")),
   },
   returns: deliveryCompanyDoc,
   handler: async (ctx, args) => {
@@ -51,6 +52,7 @@ export const create = mutation({
       nameLower: name.toLowerCase(),
       phone: cleanPhone(args.phone),
       defaultFee,
+      imageStorageId: args.imageStorageId,
       active: true,
     });
     return (await ctx.db.get(id))!;
@@ -64,6 +66,7 @@ export const update = mutation({
     name: v.string(),
     phone: v.optional(v.string()),
     defaultFee: v.number(),
+    imageStorageId: v.optional(v.id("_storage")),
     active: v.boolean(),
   },
   returns: deliveryCompanyDoc,
@@ -81,6 +84,8 @@ export const update = mutation({
       nameLower: name.toLowerCase(),
       phone: cleanPhone(args.phone),
       defaultFee: assertCents(args.defaultFee, "defaultFee"),
+      // undefined clears the logo (Convex patch semantics) — Remove in the form.
+      imageStorageId: args.imageStorageId,
       active: args.active,
     });
     return (await ctx.db.get(args.companyId))!;

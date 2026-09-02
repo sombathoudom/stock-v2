@@ -1512,6 +1512,7 @@ type OrderFieldArgs = {
   deliveryCost?: number | null;
   discount?: number;
   note?: string | null;
+  createdAt?: number;
 };
 
 /**
@@ -1730,6 +1731,32 @@ async function planOrderFields(
     });
   }
 
+  // Sale date (createdAt): same rule as checkout backdating — a real past (or
+  // today) moment, never the future. Only the sale row's createdAt moves; the
+  // order code and existing ledger-row timestamps are historical and stay put.
+  if (args.createdAt !== undefined) {
+    if (
+      !Number.isFinite(args.createdAt) ||
+      args.createdAt <= 0 ||
+      args.createdAt > Date.now()
+    ) {
+      throw new ConvexError({
+        code: "INVALID_SALE_DATE",
+        message: "Sale date can't be in the future.",
+      });
+    }
+    const createdAt = Math.floor(args.createdAt);
+    if (createdAt !== sale.createdAt) {
+      patch.createdAt = createdAt;
+      changes.push({
+        field: "saleDate",
+        label: "Sale date",
+        from: dayString(sale.createdAt, shop.timezone),
+        to: dayString(createdAt, shop.timezone),
+      });
+    }
+  }
+
   return { patch, changes, deliveryFee };
 }
 
@@ -1793,6 +1820,9 @@ export const saveEdit = mutation({
     discount: v.optional(v.number()),
     note: v.optional(v.union(v.string(), v.null())),
     status: v.optional(saleStatus),
+    // Optional backdated sale date (epoch ms, never the future) — same rule
+    // as checkout. Diffed + audited in planOrderFields.
+    createdAt: v.optional(v.number()),
     chargeDeliveryFee: v.optional(v.boolean()),
     // Approved return/correction intents (Edit Sale page): the physical
     // outcome of every held piece being removed or reduced, plus an optional

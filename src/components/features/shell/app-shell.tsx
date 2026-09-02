@@ -136,39 +136,55 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             return (
               <div key={item.href}>
                 {hasChildren ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (effectiveCollapsed) return;
-                      toggleExpanded(item.href);
-                    }}
-                    title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
+                  // A parent WITH its own page (e.g. Products): the row itself
+                  // links to that page — clicking it navigates and opens the
+                  // page where the create action lives — while a separate
+                  // chevron toggles the sub-menu. Collapsing to icon-only,
+                  // the whole item just links (no room for the chevron).
+                  <div
                     className={cn(
-                      "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                      "relative flex items-center rounded-md text-sm font-medium transition-colors",
                       (isActive(pathname, item.href) || childActive)
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                      effectiveCollapsed && "justify-center px-0",
                     )}
                   >
-                    <NavIcon item={item} />
-                    {!effectiveCollapsed && (
-                      <>
+                    <Link
+                      href={item.href}
+                      aria-current={isActive(pathname, item.href) ? "page" : undefined}
+                      title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center gap-3 px-3 py-2",
+                        effectiveCollapsed && "justify-center px-0",
+                      )}
+                    >
+                      <NavIcon item={item} />
+                      {!effectiveCollapsed && (
                         <span className="truncate">{t().nav[item.labelKey]}</span>
+                      )}
+                      {isStock && lowCount > 0 && (
+                        <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
+                      )}
+                    </Link>
+                    {!effectiveCollapsed && (
+                      <button
+                        type="button"
+                        onClick={() => toggleExpanded(item.href)}
+                        aria-label={t().nav[item.labelKey]}
+                        aria-expanded={isExpanded}
+                        className="flex shrink-0 items-center px-2 py-2"
+                      >
                         <HugeiconsIcon
                           icon={ArrowDown01Icon}
                           strokeWidth={2}
                           className={cn(
-                            "ms-auto size-4 shrink-0 transition-transform",
+                            "size-4 shrink-0 transition-transform",
                             isExpanded && "rotate-180",
                           )}
                         />
-                      </>
+                      </button>
                     )}
-                    {isStock && lowCount > 0 && (
-                      <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
-                    )}
-                  </button>
+                  </div>
                 ) : (
                   <Link
                     href={item.href}
@@ -251,27 +267,45 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               return (
                 <div key={item.href}>
                   {hasChildren ? (
-                    <button
-                      type="button"
-                      onClick={() => toggleExpanded(item.href)}
+                    // Parent row links to its own page; the chevron toggles
+                    // the sub-menu (mobile drawer).
+                    <div
                       className={cn(
-                        "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                        "relative flex items-center rounded-md text-sm font-medium transition-colors",
                         (isActive(pathname, item.href) || childActive)
                           ? "bg-primary/10 text-primary"
                           : "text-muted-foreground hover:bg-muted hover:text-foreground",
                       )}
                     >
-                      <NavIcon item={item} />
-                      <span className="truncate">{t().nav[item.labelKey]}</span>
-                      <HugeiconsIcon
-                        icon={ArrowDown01Icon}
-                        strokeWidth={2}
-                        className={cn(
-                          "ms-auto size-4 shrink-0 transition-transform",
-                          isExpanded && "rotate-180",
+                      <Link
+                        href={item.href}
+                        onClick={() => setDrawerOpen(false)}
+                        aria-current={isActive(pathname, item.href) ? "page" : undefined}
+                        className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2"
+                      >
+                        <NavIcon item={item} />
+                        <span className="truncate">{t().nav[item.labelKey]}</span>
+                        {item.labelKey === "stock" && lowCount > 0 && (
+                          <LowStockBadge count={lowCount} overlay={false} />
                         )}
-                      />
-                    </button>
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => toggleExpanded(item.href)}
+                        aria-label={t().nav[item.labelKey]}
+                        aria-expanded={isExpanded}
+                        className="flex shrink-0 items-center px-2 py-2"
+                      >
+                        <HugeiconsIcon
+                          icon={ArrowDown01Icon}
+                          strokeWidth={2}
+                          className={cn(
+                            "size-4 shrink-0 transition-transform",
+                            isExpanded && "rotate-180",
+                          )}
+                        />
+                      </button>
+                    </div>
                   ) : (
                     <Link
                       key={item.href}

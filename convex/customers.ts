@@ -10,9 +10,13 @@ import { customerDoc } from "./types";
 // (digits only, no leading zeros) and uniqueness is ENFORCED SERVER-SIDE —
 // the frontend banner is UX only. Duplicate phones cannot be force-created.
 
-/** Remove formatting and local leading zeros: "012 345 678" → "12345678". */
+/** Strip formatting (spaces, dashes, parentheses…) but KEEP the digits as
+ * entered — Cambodian numbers really start with 0 (012, 097…), so a leading
+ * zero is a real digit and must be preserved on the stored/printed number.
+ * "012 345 678" → "012345678". Dedupe still holds: two formattings of the
+ * same number normalize identically. */
 export function normalizePhone(input: string): string {
-  return input.replace(/[^0-9]/g, "").replace(/^0+/, "");
+  return input.replace(/[^0-9]/g, "");
 }
 
 /** Trim + length-check the name. Server re-validates every write. */

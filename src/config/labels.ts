@@ -443,6 +443,8 @@ export const labels = {
       defaultFee: "Default fee (what you pay)",
       defaultFeeHint:
         "Auto-filled per order when this company is picked. Override per order anytime.",
+      logo: "Logo",
+      logoHint: "Shown next to the name when picking a delivery company at checkout. Optional.",
       created: "Delivery company added.",
       saved: "Delivery company saved.",
       newTitle: "New Delivery Company",
@@ -963,6 +965,7 @@ export const labels = {
           deliveryCost: "Company cost",
           discount: "Discount",
           note: "Note",
+          saleDate: "Sale date",
           price: "Price",
           itemDiscount: "Item discount",
         },
@@ -1679,6 +1682,8 @@ export const labels = {
       defaultFee: "ថ្លៃលំនាំដើម (ដែលអ្នកបង់)",
       defaultFeeHint:
         "បំពេញដោយស្វ័យប្រវត្តិក្នុងការបញ្ជាទិញ ពេលជ្រើសក្រុមហ៊ុននេះ។ អាចកែតាមការបញ្ជាទិញនីមួយៗ។",
+      logo: "រូបសញ្ញា",
+      logoHint: "បង្ហាញក្បែរឈ្មោះ ពេលជ្រើសក្រុមហ៊ុនដឹកជញ្ជូននៅពេលទូទាត់។ ស្រេចចិត្ត។",
       created: "បានបន្ថែមក្រុមហ៊ុនដឹកជញ្ជូន។",
       saved: "បានរក្សាទុកក្រុមហ៊ុនដឹកជញ្ជូន។",
       newTitle: "ក្រុមហ៊ុនដឹកជញ្ជូនថ្មី",
@@ -2198,6 +2203,7 @@ export const labels = {
           deliveryCost: "ថ្លៃក្រុមហ៊ុន",
           discount: "បញ្ចុះតម្លៃ",
           note: "កំណត់សម្គាល់",
+          saleDate: "កាលបរិច្ឆេទលក់",
           price: "តម្លៃ",
           itemDiscount: "បញ្ចុះតម្លៃទំនិញ",
         },

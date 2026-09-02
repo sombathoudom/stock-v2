@@ -10,10 +10,11 @@ import { toast } from "sonner";
 import { z } from "zod";
 
 import { api } from "@convex/_generated/api";
-import type { Doc } from "@convex/_generated/dataModel";
+import type { Doc, Id } from "@convex/_generated/dataModel";
 import { FormInput } from "@/components/features/forms/form-input";
 import { FormMoney, moneyInputSchema } from "@/components/features/forms/form-money";
 import { FormSwitch } from "@/components/features/forms/form-switch";
+import { ImageUpload } from "@/components/features/products/image-upload";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -34,6 +35,7 @@ const deliveryCompanySchema = z.object({
   name: z.string().trim().min(1, "Required").max(100),
   phone: z.string().trim().max(50),
   defaultFee: moneyInputSchema,
+  imageStorageId: z.string().optional(),
   active: z.boolean(),
 });
 
@@ -59,6 +61,7 @@ export function DeliveryCompanyForm({
       name: company?.name ?? "",
       phone: company?.phone ?? "",
       defaultFee: centsToInput(company?.defaultFee ?? 0),
+      imageStorageId: company?.imageStorageId,
       active: company?.active ?? true,
     },
   });
@@ -70,6 +73,7 @@ export function DeliveryCompanyForm({
         name: values.name,
         phone: values.phone.trim() || undefined,
         defaultFee: inputToCents(values.defaultFee) ?? 0,
+        imageStorageId: values.imageStorageId as Id<"_storage"> | undefined,
       };
       if (company) {
         await update({ companyId: company._id, ...payload, active: values.active });
@@ -116,6 +120,11 @@ export function DeliveryCompanyForm({
               label={t().deliveryCompanies.defaultFee}
               required
               hint={t().deliveryCompanies.defaultFeeHint}
+            />
+            <ImageUpload
+              name="imageStorageId"
+              label={t().deliveryCompanies.logo}
+              hint={t().deliveryCompanies.logoHint}
             />
             {/* Deactivating is owner-only — staff see no switch (the form
                 keeps the record's current value, so saves still work). */}

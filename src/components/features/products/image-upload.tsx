@@ -97,11 +97,13 @@ export function ImageUpload({ name, label, hint, className }: ImageUploadProps) 
       <div className="flex flex-col gap-2">
         {storageId ? (
           <>
+            {/* Fixed square preview — object-contain shows the whole image
+                clearly (no stretching or cropping) on a neutral backdrop. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={imageUrl(storageId)}
               alt={t().products.photo}
-              className="h-40 w-full rounded-md border object-cover"
+              className="size-40 rounded-md border bg-muted object-contain"
             />
             <div className="flex gap-2">
               <label

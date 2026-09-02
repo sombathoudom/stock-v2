@@ -578,6 +578,43 @@ describe("sales.saveEdit", () => {
     expect(after.sale.note).toBe("Call before delivery");
     expect(after.total).toBe(1000);
   });
+
+  test("edits the sale date and audits it, but rejects a future date", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t);
+    const sale = await createSale(t, ids, [
+      { variantId: ids.variantM, qty: 1 },
+    ]);
+    const originalCreatedAt = sale.sale.createdAt;
+
+    // Backdate the order two days. Only the sale row's date moves.
+    const backdated = originalCreatedAt - 2 * 24 * 60 * 60 * 1000;
+    const after = await t.mutation(api.sales.saveEdit, {
+      idempotencyKey: requestKey("save-edit"),
+      saleId: sale.sale._id,
+      items: [],
+      createdAt: backdated,
+    });
+    expect(after.sale.createdAt).toBe(backdated);
+    // Audited as a sale_edited event carrying the saleDate field.
+    expect(
+      after.events.some(
+        (e) => e.event.type === "sale_edited" && e.event.payload?.field === "saleDate",
+      ),
+    ).toBe(true);
+
+    // A future date is refused; the sale date stays where the edit left it.
+    await expect(
+      t.mutation(api.sales.saveEdit, {
+        idempotencyKey: requestKey("save-edit"),
+        saleId: sale.sale._id,
+        items: [],
+        createdAt: Date.now() + 24 * 60 * 60 * 1000,
+      }),
+    ).rejects.toThrow();
+    const reloaded = await t.query(api.sales.getDetail, { saleId: sale.sale._id });
+    expect(reloaded!.sale.createdAt).toBe(backdated);
+  });
 });
 
 describe("sales.setStatus — pending", () => {

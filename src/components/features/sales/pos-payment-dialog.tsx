@@ -380,6 +380,7 @@ export function PosPaymentDialog({
                         selected={companyId === c._id}
                         name={c.name}
                         fee={c.defaultFee}
+                        imageStorageId={c.imageStorageId}
                         currency={currency}
                         onClick={() => onCompanyChange(c._id)}
                       />
@@ -550,11 +551,15 @@ export function PosPaymentDialog({
   );
 }
 
-/** One pickable delivery company card in the grid. */
+/** One pickable delivery company card in the grid. Shows the company logo
+ *  next to its name so staff spot the right carrier fast; a placeholder icon
+ *  stands in when the company has no logo. The Self / pickup card passes no
+ *  logo and renders the placeholder. */
 function CompanyCard({
   selected,
   name,
   fee,
+  imageStorageId,
   currency,
   onClick,
 }: {
@@ -562,6 +567,8 @@ function CompanyCard({
   name: string;
   /** Default fee in cents, shown on the card; null = the Self / pickup card. */
   fee: number | null;
+  /** Company logo; missing = placeholder icon. */
+  imageStorageId?: string;
   currency: string;
   onClick: () => void;
 }) {
@@ -570,16 +577,30 @@ function CompanyCard({
       type="button"
       onClick={onClick}
       aria-pressed={selected}
-      className={`flex flex-col gap-0.5 rounded-md border p-2 text-left transition-colors ${
+      className={`flex items-center gap-2 rounded-md border p-2 text-left transition-colors ${
         selected ? "border-primary bg-primary/5" : "hover:border-primary/60"
       }`}
     >
-      <span className="line-clamp-2 text-xs font-medium">{name}</span>
-      {fee !== null && (
-        <span className="text-[11px] tabular-nums text-muted-foreground">
-          {t().sales.deliveryFee}: {formatMoney(fee, currency, getLang())}
+      {imageStorageId ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={imageUrl(imageStorageId)}
+          alt=""
+          className="size-8 shrink-0 rounded border object-cover"
+        />
+      ) : (
+        <span className="flex size-8 shrink-0 items-center justify-center rounded border bg-muted text-muted-foreground">
+          <HugeiconsIcon icon={Image01Icon} strokeWidth={2} className="size-4" />
         </span>
       )}
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="line-clamp-2 text-xs font-medium">{name}</span>
+        {fee !== null && (
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {t().sales.deliveryFee}: {formatMoney(fee, currency, getLang())}
+          </span>
+        )}
+      </span>
     </button>
   );
 }

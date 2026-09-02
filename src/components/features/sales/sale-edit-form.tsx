@@ -18,6 +18,7 @@ import {
   moneyInputSchema,
   optionalMoneySchema,
 } from "@/components/features/forms/form-money";
+import { FormDate } from "@/components/features/forms/form-date";
 import {
   FormSelect,
   type FormSelectOption,
@@ -98,6 +99,7 @@ const schema = z.object({
   channelId: z.string().min(1),
   companyId: z.string(), // "" = Self / pickup
   status: z.string().min(1),
+  saleDate: z.number(), // sale date (createdAt), epoch ms — never the future
   deliveryFee: optionalMoneySchema,
   deliveryCost: optionalMoneySchema,
   discount: moneyInputSchema,
@@ -366,12 +368,41 @@ export function SaleEditForm({
       companyId: sale.deliveryCompanyId ?? "",
       // The order opens on the status it already has (never a blank field).
       status: sale.status,
+      saleDate: sale.createdAt,
       deliveryFee: sale.deliveryFee > 0 ? centsToInput(sale.deliveryFee) : "",
       deliveryCost: sale.deliveryCost > 0 ? centsToInput(sale.deliveryCost) : "",
       discount: centsToInput(sale.discount),
       note: sale.note ?? "",
     },
   });
+
+  // Picking a delivery company auto-fills the company cost (what the shop
+  // pays) from that company's default fee — same behaviour as POS checkout.
+  // A cost the user typed themselves is never clobbered: only an empty box
+  // or the value the previous auto-fill wrote gets replaced. Seeded with the
+  // sale's saved cost + company so mounting never overwrites an existing one.
+  const companyId = form.watch("companyId");
+  const autoCostRef = useRef(form.getValues("deliveryCost"));
+  const prevCompanyIdRef = useRef(companyId);
+  useEffect(() => {
+    // Only react to an actual company change, and only while delivery fields
+    // are editable (the cost field is hidden otherwise).
+    if (companyId === prevCompanyIdRef.current) return;
+    prevCompanyIdRef.current = companyId;
+    if (!deliveryEditable) return;
+
+    const suggested = companyId
+      ? centsToInput(
+          (companies ?? []).find((c) => c._id === companyId)?.defaultFee ?? 0
+        )
+      : "";
+    const previous = autoCostRef.current;
+    autoCostRef.current = suggested;
+    const current = form.getValues("deliveryCost");
+    if (current === "" || current === previous) {
+      form.setValue("deliveryCost", suggested, { shouldDirty: true });
+    }
+  }, [companyId, companies, deliveryEditable, form]);
 
   // The current channel/company may be inactive and missing from the active
   // lists — keep a fallback option so the field still shows its name.
@@ -654,6 +685,11 @@ export function SaleEditForm({
         ...(values.status !== sale.status
           ? { status: values.status as SaleStatus }
           : {}),
+        // Only when the sale date actually changed — the server diffs and
+        // audits it, and a same-value send is a harmless no-op.
+        ...(values.saleDate !== sale.createdAt
+          ? { createdAt: values.saleDate }
+          : {}),
         // The approved physical outcomes + refund ride in the SAME save —
         // one transaction, so a failed edit can never leave a half-applied
         // return (the server validates every bound again).
@@ -742,6 +778,16 @@ export function SaleEditForm({
                 />
               ) : null}
             </div>
+            {/* Sale date is editable (backdating): the money counts on payment
+                day, but the order's own date can be corrected here. Never the
+                future — the field caps at today. */}
+            <FormDate
+              name="saleDate"
+              label={t().sales.saleDate}
+              max={Date.now()}
+              required
+              className="sm:max-w-xs"
+            />
             <FormTextarea
               name="note"
               label={t().sales.saleNote}

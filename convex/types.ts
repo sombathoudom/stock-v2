@@ -166,6 +166,7 @@ export const deliveryCompanyDoc = v.object({
   nameLower: v.string(),
   phone: v.optional(v.string()),
   defaultFee: v.number(),
+  imageStorageId: v.optional(v.id("_storage")),
   active: v.boolean(),
 });
 

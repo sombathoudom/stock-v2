@@ -106,8 +106,9 @@ describe("customer phone uniqueness", () => {
       })
     ).rejects.toThrow("already exists");
     const unchanged = await t.query(api.customers.get, { customerId: second._id });
-    expect(unchanged?.phone).toBe("11333444");
-    expect(first.phone).toBe("10111222");
+    // Leading zeros are kept — a Cambodian number's 0 is a real digit.
+    expect(unchanged?.phone).toBe("011333444");
+    expect(first.phone).toBe("010111222");
   });
 
   test("formatted phone search finds the normalized customer", async () => {

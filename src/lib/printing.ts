@@ -193,11 +193,10 @@ function variantLabel(size: string, color?: string): string {
   return color ? `${size} / ${color}` : size;
 }
 
-/** Phones are stored normalized without the leading trunk zero — paper must
- * show the dialable local form ("012 594 389", never "12594389"). */
+/** Phones are stored with their digits exactly as entered (leading trunk
+ * zero kept), so paper shows them verbatim — no zero is added or removed. */
 function phoneDisplay(phone: string): string {
-  const trimmed = phone.trim();
-  return trimmed.startsWith("0") ? trimmed : `0${trimmed}`;
+  return phone.trim();
 }
 
 /** text() only APPENDS bytes — it never breaks the line. Every row must

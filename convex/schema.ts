@@ -119,6 +119,7 @@ export default defineSchema({
     nameLower: v.string(), // case-insensitive prefix search
     phone: v.optional(v.string()),
     defaultFee: v.number(), // what the shop pays per handled order, integer cents
+    imageStorageId: v.optional(v.id("_storage")), // logo, shown in the POS picker
     active: v.boolean(),
   }).index("by_nameLower", ["nameLower"]),
 
