@@ -505,6 +505,7 @@ function SaleDetailView({ detail }: { detail: SaleDetail }) {
           detail={detail}
           shopName={shop?.name ?? ""}
           shopAddress={shop?.address}
+          shopPhone={shop?.phone}
           currency={currency}
           timezone={timezone}
           printerConfig={shop?.printerConfig}

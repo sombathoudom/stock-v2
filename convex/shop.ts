@@ -18,6 +18,7 @@ const saveArgs = v.object({
   language: v.union(v.literal("en"), v.literal("km")),
   deliveryEnabled: v.boolean(),
   address: v.optional(v.string()),
+  phone: v.optional(v.string()),
   exchangeRate: v.number(),
   lowStockThreshold: v.optional(v.number()),
   // T25 — thermal printer setup (absent = no thermal printer configured).
@@ -45,6 +46,7 @@ function validate(input: {
   language: "en" | "km";
   deliveryEnabled: boolean;
   address?: string;
+  phone?: string;
   exchangeRate: number;
   lowStockThreshold?: number;
   printerConfig?: {
@@ -96,6 +98,7 @@ function validate(input: {
   }
 
   const address = input.address?.trim() ? input.address.trim().slice(0, 500) : undefined;
+  const phone = input.phone?.trim() ? input.phone.trim().slice(0, 40) : undefined;
 
   // Printer config: only the fields the type needs; ids must be uint16,
   // port a sane TCP port, strings bounded so the row stays small.
@@ -133,6 +136,7 @@ function validate(input: {
     language: input.language,
     deliveryEnabled: input.deliveryEnabled,
     address,
+    phone,
     exchangeRate: input.exchangeRate,
     lowStockThreshold,
     // Always present: Convex patch removes a field when its value is

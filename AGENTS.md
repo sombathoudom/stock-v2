@@ -219,3 +219,17 @@ POS for an online clothing shop (DolyOutfits), but designed **generic**: any sho
 - Before each task, read the relevant guide in `node_modules/next/dist/docs/` (APIs differ from older Next.js).
 - Tests: `npm test` (Vitest + `convex-test`, config in `vitest.config.mts`, specs in `convex/*.test.ts`). They run Convex functions in-memory — no deployment, and the local backend's data is never touched. Sign-in is the only thing stubbed (`vi.mock("./auth")` replaces the better-auth component, which has no in-memory equivalent); `requireUser` and every business rule below it run for real against a seeded `users` row.
 - This project runs an **anonymous local Convex deployment**: `.env.local` vars do NOT reach the Convex runtime, and `npx convex env set` fails (needs cloud login). Set deployment env vars by POSTing to `http://127.0.0.1:3210/api/update_environment_variables` with header `Authorization: Convex <adminKey>` (adminKey in `.convex/local/default/config.json`) and body `{"changes":[{"name":"X","value":"Y"}]}`. Vars persist in the backend's sqlite and survive restarts.
+
+<!-- convex-ai-start -->
+
+This project uses [Convex](https://convex.dev) as its backend.
+
+When working on Convex code, **always read
+`convex/_generated/ai/guidelines.md` first** for important guidelines on
+how to correctly use Convex APIs and patterns. The file contains rules that
+override what you may have learned about Convex from training data.
+
+Convex agent skills for common tasks can be installed by running
+`npx convex ai-files install`.
+
+<!-- convex-ai-end -->

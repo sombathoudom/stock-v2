@@ -1,6 +1,6 @@
 "use client";
 
-import { Delete02Icon, Image01Icon } from "@hugeicons/core-free-icons";
+import { AddCircleIcon, Delete02Icon, Image01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 import { Button } from "@/components/ui/button";
@@ -39,9 +39,10 @@ export function PosCart({
   const body = (
     <>
       {lines.length === 0 && (
-        <p className="py-4 text-center text-sm text-muted-foreground">
+        <div className="flex flex-col items-center gap-2 py-6 text-center text-sm text-muted-foreground">
+          <HugeiconsIcon icon={AddCircleIcon} className="size-8 opacity-60" />
           {t().sales.cartEmpty}
-        </p>
+        </div>
       )}
       {totals.map(({ line, lineTotal }) => (
         <div key={cartLineId(line)} className="flex items-start gap-2 border-b pb-2 last:border-b-0">

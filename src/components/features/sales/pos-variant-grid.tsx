@@ -8,7 +8,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useQuery } from "convex/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@convex/_generated/api";
 import type { Doc, Id } from "@convex/_generated/dataModel";
@@ -37,7 +37,12 @@ const PAGE_SIZE = 24;
 /** One active variant with computed ledger stock + effective price. */
 type PosVariant = { variant: Doc<"productVariants">; stock: number; price: number };
 
-export function PosVariantGrid({
+// Memoized: the POS page re-renders on every keystroke in the checkout
+// popup's amount/note fields. Without memo the whole grid (batch query +
+// every card) re-renders each keystroke, which made the modal feel slow.
+// All props from the page are stable references (useCallback handlers,
+// persisted filter values) so memo actually short-circuits.
+function PosVariantGridImpl({
   currency,
   onAdd,
   cart,
@@ -238,6 +243,8 @@ export function PosVariantGrid({
     </div>
   );
 }
+
+export const PosVariantGrid = memo(PosVariantGridImpl);
 
 /** One compact variant card: small image, bold "Name – Size · Color",
  *  "SKU, CODE, Qty" meta line, price bottom-left, (+) bottom-right. The whole

@@ -6,6 +6,7 @@ import {
   Cancel01Icon,
   Cash01Icon,
   Coins01Icon,
+  Image01Icon,
   ShoppingCart01Icon,
   StickyNote01Icon,
   Tick02Icon,
@@ -30,7 +31,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { type CartLine } from "@/hooks/use-checkout-cart";
-import { cn, formatMoney, getLang, t } from "@/lib/utils";
+import { cn, formatMoney, getLang, imageUrl, t } from "@/lib/utils";
 
 // POS v4 — the "Payment Checkout" popup (2xl Dialog on desktop, bottom Sheet
 // on phone). Three columns on desktop:
@@ -166,7 +167,7 @@ export function PosPaymentDialog({
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Body — the middle scrolls (the summary items additionally scroll on
           their own); the footer below stays pinned. */}
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain">
         {/* Three columns on desktop, stacked on phone. */}
         <div className="grid items-start gap-3 sm:grid-cols-3">
           {/* LEFT — Transaction Summary + Total Amount */}
@@ -202,16 +203,30 @@ export function PosPaymentDialog({
             </p>
             <div
               className={cn(
-                "max-h-[40dvh] overflow-y-auto border-t p-3 sm:block sm:border-t-0",
+                "max-h-[40dvh] overflow-y-auto overscroll-contain border-t p-3 [-webkit-overflow-scrolling:touch] sm:block sm:border-t-0",
                 summaryOpen ? "block" : "hidden",
               )}
             >
               {cart.map((line) => (
                 <div
                   key={line.key ?? line.variantId}
-                  className="flex items-start justify-between gap-2 border-b py-1.5 last:border-b-0"
+                  className="flex items-center gap-2 border-b py-1.5 last:border-b-0"
                 >
-                  <span className="min-w-0">
+                  {/* Product thumbnail so staff can eyeball each line before
+                      taking payment; placeholder when the product has no photo. */}
+                  {line.imageStorageId ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={imageUrl(line.imageStorageId)}
+                      alt=""
+                      className="size-9 shrink-0 rounded border object-cover"
+                    />
+                  ) : (
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded border bg-muted text-muted-foreground">
+                      <HugeiconsIcon icon={Image01Icon} strokeWidth={2} className="size-4" />
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">{line.label}</span>
                     <span className="text-xs tabular-nums text-muted-foreground">
                       {line.qty} × {formatMoney(line.price, currency, getLang())}

@@ -12,6 +12,7 @@ export default defineSchema({
     name: v.string(),
     logoStorageId: v.optional(v.id("_storage")),
     address: v.optional(v.string()),
+    phone: v.optional(v.string()), // shown as the sender on printed invoices
     currency: v.string(), // base currency code, e.g. "USD"
     exchangeRate: v.number(), // e.g. 4000 riel per 1 USD — owner-stored, used to convert
     timezone: v.string(), // e.g. "Asia/Phnom_Penh"

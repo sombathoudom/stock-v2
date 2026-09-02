@@ -70,6 +70,7 @@ export const shopDoc = v.object({
   name: v.string(),
   logoStorageId: v.optional(v.id("_storage")),
   address: v.optional(v.string()),
+  phone: v.optional(v.string()),
   currency: v.string(),
   exchangeRate: v.number(),
   timezone: v.string(),

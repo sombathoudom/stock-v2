@@ -20,9 +20,9 @@ import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
 import {
   InvoiceDialog,
-  toPrintSale,
   type SaleDetail,
 } from "@/components/features/sales/invoice-dialog";
+import { PosCalculator } from "@/components/features/sales/pos-calculator";
 import { PosCart } from "@/components/features/sales/pos-cart";
 import { PosCustomerStep } from "@/components/features/sales/pos-customer-step";
 import { PosFilterBar } from "@/components/features/sales/pos-filter-bar";
@@ -54,7 +54,6 @@ import { useCurrentUser } from "@/hooks/use-current-user";
 import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { usePersistentState } from "@/hooks/use-persistent-state";
-import { printReceiptDoc, toastPrintError } from "@/lib/printing";
 import {
   centsToInput,
   formatMoney,
@@ -330,22 +329,10 @@ export default function NewSalePage() {
       setOrderOpen(false);
       setInvoice(detail);
 
-      // T25 — auto-print the 80mm receipt when the shop has a printer set up.
-      // Fire-and-forget: a failure only toasts; the open invoice dialog still
-      // offers receipt / label / A5 re-prints.
-      if (shop?.printerConfig) {
-        printReceiptDoc(
-          toPrintSale(detail, {
-            shopName: shop.name,
-            shopAddress: shop.address,
-            currency,
-            timezone,
-          }),
-          shop.printerConfig
-        )
-          .then(() => toast.success(t().sales.receiptSent))
-          .catch(toastPrintError);
-      }
+      // No auto-print: completing the sale only opens the invoice dialog.
+      // Nothing prints until the user clicks a print button there (receipt /
+      // label / A5). If they close the dialog, nothing is printed.
+
       // Reset the flow for the next sale. The customer selector falls back
       // to the walk-in / default preselection automatically.
       clear();
@@ -554,6 +541,11 @@ export default function NewSalePage() {
             categoryFilter={categoryFilter}
             onCategoryFilter={setCategoryFilter}
           />
+        </div>
+        {/* Top-right scratchpad calculator — a quick popup for staff to work
+            out change/splits; never touches the cart or a sale. */}
+        <div className="ml-auto shrink-0">
+          <PosCalculator />
         </div>
       </div>
       {/* BODY — two equal halves as flex. Both halves scroll independently;
@@ -815,6 +807,7 @@ export default function NewSalePage() {
         detail={invoice}
         shopName={shop?.name ?? ""}
         shopAddress={shop?.address}
+        shopPhone={shop?.phone}
         currency={currency}
         timezone={timezone}
         printerConfig={shop?.printerConfig}

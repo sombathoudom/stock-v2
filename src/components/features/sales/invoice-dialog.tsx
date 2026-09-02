@@ -58,6 +58,7 @@ export function InvoiceDialog({
   detail,
   shopName,
   shopAddress,
+  shopPhone,
   currency,
   timezone,
   printerConfig,
@@ -67,6 +68,8 @@ export function InvoiceDialog({
   detail: SaleDetail | null;
   shopName: string;
   shopAddress?: string;
+  /** Shop phone — printed as the invoice sender. */
+  shopPhone?: string;
   currency: string;
   timezone: string;
   /** The shop's saved thermal printer setup (undefined = not configured). */
@@ -86,7 +89,7 @@ export function InvoiceDialog({
   }
 
   const printDoc = detail
-    ? toPrintSale(detail, { shopName, shopAddress, currency, timezone })
+    ? toPrintSale(detail, { shopName, shopAddress, shopPhone, currency, timezone })
     : null;
 
   async function doThermal(kind: "receipt" | "label") {
@@ -138,22 +141,38 @@ export function InvoiceDialog({
               <span>{formatDateTime(detail.sale.createdAt, timezone, getLang())}</span>
             </div>
 
-            <div className="grid grid-cols-2 gap-1 text-sm">
-              <div>
-                <p className="text-xs text-muted-foreground">
-                  {t().sales.customer}
+            {/* Customer + order info — plain "Label: value" lines, no box.
+                Phone/address/delivery-by print only when present (self-pickup
+                orders have no company). The sender is the shop. */}
+            <div className="flex flex-col gap-0.5 text-sm">
+              <p>
+                <span className="text-muted-foreground">{t().sales.customer}:</span>{" "}
+                <span className="font-medium">{detail.customer.name}</span>
+              </p>
+              {detail.customer.phone ? (
+                <p>
+                  <span className="text-muted-foreground">{t().common.phone}:</span>{" "}
+                  <span className="tabular-nums">{detail.customer.phone}</span>
                 </p>
-                <p className="truncate">
-                  {detail.customer.name}
-                  {detail.customer.phone ? ` · ${detail.customer.phone}` : ""}
+              ) : null}
+              {detail.customer.address ? (
+                <p>
+                  <span className="text-muted-foreground">{t().sales.location}:</span>{" "}
+                  {detail.customer.address}
                 </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">
-                  {t().sales.channel}
+              ) : null}
+              {detail.company ? (
+                <p>
+                  <span className="text-muted-foreground">
+                    {t().sales.deliveryBy}:
+                  </span>{" "}
+                  {detail.company.name}
                 </p>
-                <p className="truncate">{detail.channel.name}</p>
-              </div>
+              ) : null}
+              <p>
+                <span className="text-muted-foreground">{t().sales.sender}:</span>{" "}
+                {shopPhone ? shopPhone : shopName}
+              </p>
             </div>
 
             <Table>
@@ -309,6 +328,7 @@ export function toPrintSale(
   ctx: {
     shopName: string;
     shopAddress?: string;
+    shopPhone?: string;
     currency: string;
     timezone: string;
   }
@@ -320,6 +340,7 @@ export function toPrintSale(
     currency: ctx.currency,
     shopName: ctx.shopName,
     shopAddress: ctx.shopAddress,
+    shopPhone: ctx.shopPhone,
     customerName: detail.customer.name,
     customerPhone: detail.customer.phone,
     customerAddress: detail.customer.address,

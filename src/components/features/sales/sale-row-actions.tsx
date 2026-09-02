@@ -286,6 +286,7 @@ function InvoiceBranch({
       detail={detail}
       shopName={shop?.name ?? ""}
       shopAddress={shop?.address}
+      shopPhone={shop?.phone}
       currency={shop?.currency ?? "USD"}
       timezone={shop?.timezone ?? "Asia/Phnom_Penh"}
       printerConfig={shop?.printerConfig}

@@ -47,6 +47,7 @@ export interface PrintSale {
   currency: string;
   shopName: string;
   shopAddress?: string;
+  shopPhone?: string;
   customerName: string;
   customerPhone: string;
   customerAddress?: string;
@@ -423,6 +424,11 @@ export function buildReceiptBytes(doc: PrintSale): Uint8Array {
 
   enc.initialize();
   printRow(enc, doc.shopName, { align: "center", bold: true });
+  if (doc.shopPhone) {
+    printRow(enc, `${E.sales.sender}: ${phoneDisplay(doc.shopPhone)}`, {
+      align: "center",
+    });
+  }
   enc.align("center").bold(true);
   row(enc, E.sales.invoice.toUpperCase());
   enc.align("left").bold(false);

@@ -91,6 +91,7 @@ const settingsSchema = z.object({
   language: z.enum(["en", "km"]),
   deliveryEnabled: z.boolean(),
   address: z.string().trim().max(500),
+  phone: z.string().trim().max(40),
   exchangeRate: z.coerce.number().positive().max(1_000_000),
   lowStockThreshold: z.preprocess(
     (value) => (value === "" || value == null ? undefined : value),
@@ -130,6 +131,7 @@ const DEFAULT_VALUES: SettingsFormValues = {
   language: "en",
   deliveryEnabled: false,
   address: "",
+  phone: "",
   exchangeRate: 1,
   lowStockThreshold: undefined,
   defaultCustomerId: DEFAULT_CUSTOMER_NONE,
@@ -156,6 +158,7 @@ function shopToValues(shop: Doc<"shop">): SettingsFormValues {
     language: shop.language,
     deliveryEnabled: shop.deliveryEnabled,
     address: shop.address ?? "",
+    phone: shop.phone ?? "",
     exchangeRate: shop.exchangeRate,
     lowStockThreshold: shop.lowStockThreshold,
     defaultCustomerId: shop.defaultCustomerId ?? DEFAULT_CUSTOMER_NONE,
@@ -199,6 +202,7 @@ function savePayload(values: SettingsFormValues) {
     language: values.language,
     deliveryEnabled: values.deliveryEnabled,
     address: values.address || undefined,
+    phone: values.phone || undefined,
     exchangeRate: values.exchangeRate,
     lowStockThreshold: values.lowStockThreshold,
     // Sentinel → null clears the default (POS falls back to walk-in); the
@@ -872,6 +876,12 @@ export default function SettingsPage() {
                 name="deliveryEnabled"
                 label={t().settings.deliveryEnabled}
                 hint={t().settings.deliveryHint}
+              />
+              <FormInput
+                name="phone"
+                label={t().settings.phone}
+                hint={t().settings.phoneHint}
+                inputMode="tel"
               />
               <FormTextarea
                 name="address"
