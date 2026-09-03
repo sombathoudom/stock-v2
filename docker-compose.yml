@@ -3,23 +3,50 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+
       args:
         NEXT_PUBLIC_CONVEX_URL: ${NEXT_PUBLIC_CONVEX_URL}
         NEXT_PUBLIC_CONVEX_SITE_URL: ${NEXT_PUBLIC_CONVEX_SITE_URL}
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL}
-        APP_PORT: ${APP_PORT:-3000}
-    ports:
-      - "${APP_PORT:-3000}:${APP_PORT:-3000}"
+        APP_URL: ${APP_URL}
+
+    # Dokploy / Traefik access
+    expose:
+      - "3000"
+
     environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_CONVEX_URL=${NEXT_PUBLIC_CONVEX_URL}
-      - NEXT_PUBLIC_CONVEX_SITE_URL=${NEXT_PUBLIC_CONVEX_SITE_URL}
-      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
-      - PORT=${APP_PORT:-3000}
+      NODE_ENV: production
+
+      PORT: 3000
+
+      HOSTNAME: 0.0.0.0
+
+      NEXT_PUBLIC_CONVEX_URL: ${NEXT_PUBLIC_CONVEX_URL}
+
+      NEXT_PUBLIC_CONVEX_SITE_URL: ${NEXT_PUBLIC_CONVEX_SITE_URL}
+
+      APP_URL: ${APP_URL}
+
     restart: unless-stopped
+
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${APP_PORT:-3000}"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3000",
+        ]
+
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
