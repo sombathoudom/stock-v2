@@ -22,6 +22,13 @@ export type CartLine = {
   stock?: number;
   /** Product photo for the cart line + review modal; missing = placeholder. */
   imageStorageId?: string;
+  /** Combo-set lines: the set recipe this line came from — the server reads
+   *  the price from it (client never sends a set price). */
+  setId?: string;
+  /** Shared by all lines of ONE sold set instance (grouping + display). */
+  setGroupId?: string;
+  /** Set name for the cart grouping header (display only). */
+  setName?: string;
 };
 
 /** Identity of a line: the per-add key. Legacy persisted carts (pre-key)
@@ -29,13 +36,17 @@ export type CartLine = {
  *  carts were deduped by variant, so the fallback stays unique too. */
 export const cartLineId = (line: CartLine) => line.key ?? line.variantId;
 
-/** Add a variant or increase its existing line when the total fits stock. */
+/** Add a variant or increase its existing line when the total fits stock.
+ *  Combo-set lines never merge — a set instance's lines stay their own rows
+ *  (they carry a set price + group id), so they're always appended fresh. */
 export function addCartLine(
   current: CartLine[],
   line: Omit<CartLine, "key">,
   key: string
 ): CartLine[] {
   const stock = line.stock ?? Number.POSITIVE_INFINITY;
+  // Cumulative qty of this variant already in the cart (any line — set or
+  // single) so the stock clamp can't be dodged by mixing.
   const variantQty = current.reduce(
     (total, item) =>
       item.variantId === line.variantId ? total + item.qty : total,
@@ -43,13 +54,18 @@ export function addCartLine(
   );
 
   if (line.qty < 1 || variantQty + line.qty > stock) return current;
-  const existingIndex = current.findIndex(
-    (item) => item.variantId === line.variantId
-  );
-  if (existingIndex !== -1) {
-    return current.map((item, index) =>
-      index === existingIndex ? { ...item, qty: item.qty + line.qty } : item
+
+  // Set lines are always their own row; only plain single lines merge with an
+  // existing plain line of the same variant.
+  if (!line.setGroupId) {
+    const existingIndex = current.findIndex(
+      (item) => item.variantId === line.variantId && !item.setGroupId
     );
+    if (existingIndex !== -1) {
+      return current.map((item, index) =>
+        index === existingIndex ? { ...item, qty: item.qty + line.qty } : item
+      );
+    }
   }
   return [...current, { ...line, key }];
 }
@@ -61,6 +77,21 @@ export function useCheckoutCart() {
   const addVariant = useCallback(
     (line: Omit<CartLine, "key">) => {
       setCart((current) => addCartLine(current, line, crypto.randomUUID()));
+    },
+    [setCart]
+  );
+
+  /** Add several lines at once (a combo set's components). Applied in order
+   *  through addCartLine so the cumulative stock clamp still holds; set lines
+   *  never merge (they carry a setGroupId), so each lands as its own row. */
+  const addLines = useCallback(
+    (lines: Omit<CartLine, "key">[]) => {
+      setCart((current) =>
+        lines.reduce(
+          (acc, line) => addCartLine(acc, line, crypto.randomUUID()),
+          current,
+        ),
+      );
     },
     [setCart]
   );
@@ -93,5 +124,5 @@ export function useCheckoutCart() {
     setCart([]);
   }, [setCart]);
 
-  return { cart, addVariant, updateLine, removeLine, clear };
+  return { cart, addVariant, addLines, updateLine, removeLine, clear };
 }

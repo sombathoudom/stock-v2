@@ -13,6 +13,7 @@ import {
   DeliveryTruck01Icon,
   FileUploadIcon,
   Link01Icon,
+  Package01Icon,
   PackageReceive01Icon,
   Settings01Icon,
   Shirt01Icon,
@@ -41,6 +42,7 @@ export type NavItem = {
     | "delivery"
     | "deliveryReport"
     | "channels"
+    | "sets"
     | "expenses"
     | "reports"
     | "settings"
@@ -112,6 +114,12 @@ export const navItems: NavItem[] = [
         href: "/products/opening-stock",
         icon: WarehouseIcon,
         phase: 1,
+      },
+      {
+        labelKey: "sets",
+        href: "/sets",
+        icon: Package01Icon,
+        phase: 3,
       },
     ],
   },

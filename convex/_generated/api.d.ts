@@ -32,6 +32,7 @@ import type * as purchases from "../purchases.js";
 import type * as reports from "../reports.js";
 import type * as sales from "../sales.js";
 import type * as seed from "../seed.js";
+import type * as sets from "../sets.js";
 import type * as shop from "../shop.js";
 import type * as stock from "../stock.js";
 import type * as suppliers from "../suppliers.js";
@@ -69,6 +70,7 @@ declare const fullApi: ApiFromModules<{
   reports: typeof reports;
   sales: typeof sales;
   seed: typeof seed;
+  sets: typeof sets;
   shop: typeof shop;
   stock: typeof stock;
   suppliers: typeof suppliers;

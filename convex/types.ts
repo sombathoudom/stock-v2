@@ -170,6 +170,39 @@ export const deliveryCompanyDoc = v.object({
   active: v.boolean(),
 });
 
+// --- Combo sets (bundles) ---
+
+export const setDoc = v.object({
+  _id: v.id("sets"),
+  _creationTime: v.number(),
+  name: v.string(),
+  nameLower: v.string(),
+  imageStorageId: v.optional(v.id("_storage")),
+  active: v.boolean(),
+});
+
+export const setItemDoc = v.object({
+  _id: v.id("setItems"),
+  _creationTime: v.number(),
+  setId: v.id("sets"),
+  productId: v.id("products"),
+  qty: v.number(),
+  setPrice: v.number(),
+});
+
+/** A set + its component lines joined with the product each points at (for the
+ *  CRUD screen and the POS size popup). `setTotal` = Σ setPrice × qty. */
+export const setDetail = v.object({
+  set: setDoc,
+  items: v.array(
+    v.object({
+      item: setItemDoc,
+      product: productDoc,
+    })
+  ),
+  setTotal: v.number(),
+});
+
 export const purchaseDoc = v.object({
   _id: v.id("purchases"),
   _creationTime: v.number(),
@@ -346,6 +379,8 @@ export const saleItemDoc = v.object({
   // Internal add-on rows written by saveEdit raises (see schema). The edit
   // page never sees them — getEditData folds them into their parent.
   splitFromItemId: v.optional(v.id("saleItems")),
+  // Combo sets: shared by all lines of one sold set instance (see schema).
+  setGroupId: v.optional(v.string()),
 });
 
 export const paymentDoc = v.object({
@@ -924,11 +959,16 @@ export const checkoutPaymentMethod = v.union(
   v.literal("other")
 );
 
-/** One checkout line: ids + qty + discount only — prices/costs are re-derived server-side. */
+/** One checkout line: ids + qty + discount only — prices/costs are re-derived
+ *  server-side. For a combo-set line, `setId` names the recipe (the server
+ *  reads the set price from it — the client never sends a price) and
+ *  `setGroupId` ties the set's lines together for grouping/display. */
 export const checkoutLine = v.object({
   variantId: v.id("productVariants"),
   qty: v.number(),
   discount: v.optional(v.number()),
+  setId: v.optional(v.id("sets")),
+  setGroupId: v.optional(v.string()),
 });
 
 /** Checkout payment: the amount the cashier RECEIVED. The server clamps the

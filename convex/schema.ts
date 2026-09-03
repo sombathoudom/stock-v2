@@ -123,6 +123,29 @@ export default defineSchema({
     active: v.boolean(),
   }).index("by_nameLower", ["nameLower"]),
 
+  // Combo sets (bundles): a SAVED RECIPE of existing products sold together at
+  // a special price. The set holds NO stock of its own — selling one deducts
+  // each component variant from the ledger, so availability is derived from
+  // the components (rule #1: one source of truth). Each component carries its
+  // own `setPrice` (used only when sold as part of this set); the product's
+  // normal price is untouched. Soft-delete only (may sit on past sales).
+  sets: defineTable({
+    name: v.string(),
+    nameLower: v.string(), // case-insensitive prefix search
+    imageStorageId: v.optional(v.id("_storage")), // optional set photo
+    active: v.boolean(),
+  }).index("by_nameLower", ["nameLower"]),
+
+  // One component line of a set recipe: which product, how many, and the price
+  // per piece INSIDE this set. Size is chosen at checkout (not stored here) so
+  // the same recipe covers every size and mix-and-match combos.
+  setItems: defineTable({
+    setId: v.id("sets"),
+    productId: v.id("products"),
+    qty: v.number(), // pieces of this product per set (>= 1)
+    setPrice: v.number(), // price per piece inside the set, integer cents
+  }).index("by_set", ["setId"]),
+
   // Editable at any time. Stock enters via ledger rows owned by purchaseItems.
   // purchasedAt is the business (purchase) date; receivedAt the arrival date
   // (present = stock is in).
@@ -271,6 +294,10 @@ export default defineSchema({
     // quantities against the parent's EFFECTIVE billed total (this row +
     // every split row), so re-saving the same displayed quantity is a no-op.
     splitFromItemId: v.optional(v.id("saleItems")),
+    // Combo sets: all lines that came from ONE sold set instance share this
+    // id (a per-instance uuid, NOT a foreign key — survives set deletion), so
+    // the invoice/detail can group them. Absent on normal single-item lines.
+    setGroupId: v.optional(v.string()),
   })
     .index("by_sale", ["saleId"])
     .index("by_variant", ["variantId"]),

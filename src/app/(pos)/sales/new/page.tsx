@@ -24,6 +24,7 @@ import {
 } from "@/components/features/sales/invoice-dialog";
 import { PosCalculator } from "@/components/features/sales/pos-calculator";
 import { PosCart } from "@/components/features/sales/pos-cart";
+import { PosSetStrip } from "@/components/features/sales/pos-set-strip";
 import { PosCustomerStep } from "@/components/features/sales/pos-customer-step";
 import { PosFilterBar } from "@/components/features/sales/pos-filter-bar";
 import {
@@ -105,7 +106,7 @@ export default function NewSalePage() {
   const router = useRouter();
 
   // The cart is UI state — it survives reloads like every other preference.
-  const { cart, addVariant, updateLine, removeLine, clear } = useCheckoutCart();
+  const { cart, addVariant, addLines, updateLine, removeLine, clear } = useCheckoutCart();
 
   // Product filters live in the HEADER and are owned here (persisted), so
   // the footer's Reset button can clear them.
@@ -286,6 +287,10 @@ export default function NewSalePage() {
           ...(inputToCents(line.discount)
             ? { discount: inputToCents(line.discount)! }
             : {}),
+          // Combo-set lines: the server reads the price from the recipe named
+          // by setId; setGroupId ties the set's lines together.
+          ...(line.setId ? { setId: line.setId as Id<"sets"> } : {}),
+          ...(line.setGroupId ? { setGroupId: line.setGroupId } : {}),
         })),
         ...(paid
           ? {
@@ -547,6 +552,10 @@ export default function NewSalePage() {
               showCart ? "hidden md:block" : "",
             )}
           >
+            {/* Combo sets: a row of set cards above the product grid. Hidden
+                when the shop has no sets; the single-product grid below is
+                unchanged. */}
+            <PosSetStrip currency={currency} onAddLines={addLines} />
             <PosVariantGrid
               key={refreshTick}
               resetSignal={resetTick}

@@ -497,7 +497,15 @@ export const checkout = mutation({
       price: number;
       unitCostSnapshot: number;
       itemDiscount: number;
+      setGroupId?: string;
     }[] = [];
+    // Combo-set recipes are read once and cached: several lines of one set
+    // share a setId, and we resolve each line's price from the recipe (never
+    // from the client) — the server always owns the price.
+    const setCache = new Map<
+      Id<"sets">,
+      Map<Id<"products">, number>
+    >();
     let subtotal = 0;
     // The POS keeps every add as its OWN line — the same variant may appear
     // several times ("never merged"). Oversell protection must therefore be
@@ -512,7 +520,40 @@ export const checkout = mutation({
       if (!variant || !variant.active || !product || !product.active) {
         throw new ConvexError({ code: "NOT_FOUND", message: "Item not found." });
       }
-      const price = assertCents(variant.price ?? product.defaultPrice, "price");
+
+      // Combo-set line: the price comes from the set RECIPE (this product's
+      // setPrice), never the client — same "the DB wins" rule as normal
+      // prices. The chosen variant must belong to one of the set's component
+      // products, else it's a tampered/mismatched line and is rejected.
+      let price: number;
+      let setGroupId: string | undefined;
+      if (line.setId !== undefined) {
+        let priceByProduct = setCache.get(line.setId);
+        if (priceByProduct === undefined) {
+          const set = await ctx.db.get(line.setId);
+          if (!set || !set.active) {
+            throw new ConvexError({ code: "NOT_FOUND", message: "Set not found." });
+          }
+          const items = await ctx.db
+            .query("setItems")
+            .withIndex("by_set", (q) => q.eq("setId", line.setId!))
+            .collect();
+          priceByProduct = new Map(items.map((i) => [i.productId, i.setPrice]));
+          setCache.set(line.setId, priceByProduct);
+        }
+        const setPrice = priceByProduct.get(variant.productId);
+        if (setPrice === undefined) {
+          throw new ConvexError({
+            code: "INVALID_INPUT",
+            message: "This item is not part of the set.",
+          });
+        }
+        price = assertCents(setPrice, "set price");
+        setGroupId = line.setGroupId?.trim().slice(0, 64) || undefined;
+      } else {
+        price = assertCents(variant.price ?? product.defaultPrice, "price");
+      }
+
       qtyByVariant.set(line.variantId, (qtyByVariant.get(line.variantId) ?? 0) + qty);
       const unitCostSnapshot = await weightedAvgCost(ctx, line.variantId, variant, product);
       const itemDiscount =
@@ -524,7 +565,16 @@ export const checkout = mutation({
         });
       }
       subtotal += price * qty - itemDiscount;
-      prepared.push({ line, qty, variant, product, price, unitCostSnapshot, itemDiscount });
+      prepared.push({
+        line,
+        qty,
+        variant,
+        product,
+        price,
+        unitCostSnapshot,
+        itemDiscount,
+        setGroupId,
+      });
     }
 
     // Oversell is impossible: the shared rule re-checks the ledger for every
@@ -600,6 +650,7 @@ export const checkout = mutation({
         qtyCancelled: 0,
         qtyReturned: 0,
         discount: p.itemDiscount === 0 ? undefined : p.itemDiscount,
+        ...(p.setGroupId ? { setGroupId: p.setGroupId } : {}),
       });
       await ctx.db.insert("stockLedger", {
         variantId: p.line.variantId,
