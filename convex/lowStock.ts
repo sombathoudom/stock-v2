@@ -4,7 +4,7 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import { query } from "./_generated/server";
-import { getShop, requireUser } from "./helpers";
+import { requireUser } from "./helpers";
 import { variantLabel } from "./sales";
 import { variantQty } from "./stock";
 import { lowStockItem } from "./types";
@@ -55,7 +55,9 @@ export async function collectLowStock(
 }
 
 // Full reorder list: every low-stock variant with its label and computed
-// stock, worst first — powers the stock page's alert card.
+// stock, worst first — powers the stock page's alert card. Returns an empty
+// list (never a NO_SHOP throw) before the owner finishes Settings — same
+// fresh-signup handling as dashboard.overview.
 export const lowStock = query({
   args: {},
   returns: v.object({
@@ -64,13 +66,16 @@ export const lowStock = query({
   }),
   handler: async (ctx) => {
     await requireUser(ctx);
-    const shop = await getShop(ctx);
+    const shop = await ctx.db.query("shop").first();
+    if (!shop) return { threshold: 0, items: [] };
     return collectLowStock(ctx, shop);
   },
 });
 
 // Just the count for the nav badge — same walk, same source of truth, so
-// the badge can never disagree with the lists.
+// the badge can never disagree with the lists. The nav badge renders on
+// EVERY page, including right after sign-up before the shop row exists, so
+// it must never throw NO_SHOP — a count of 0 until Settings is done.
 export const lowStockCount = query({
   args: {},
   returns: v.object({
@@ -79,7 +84,8 @@ export const lowStockCount = query({
   }),
   handler: async (ctx) => {
     await requireUser(ctx);
-    const shop = await getShop(ctx);
+    const shop = await ctx.db.query("shop").first();
+    if (!shop) return { count: 0, threshold: 0 };
     const { threshold, items } = await collectLowStock(ctx, shop);
     return { count: items.length, threshold };
   },
