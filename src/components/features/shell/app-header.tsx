@@ -104,7 +104,15 @@ export function AppHeader({
   async function signOut() {
     try {
       await authClient.signOut();
-      router.push("/sign-in");
+      // Full-page navigation on purpose. Auth is gated by the SERVER auth
+      // cookie: the (auth) layout redirects out when it's gone, and the
+      // (unauth) layout redirects to /dashboard when it's still present. A
+      // soft router.push/refresh can race the cookie clear — the (unauth)
+      // layout then still sees a session and bounces straight back to
+      // /dashboard (the "sign-in flashes then dashboard" bug). A hard load
+      // makes a fresh request with the cleared cookie, so the guard is right.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+      window.location.assign("/sign-in");
     } catch (err) {
       toastError(err);
     }

@@ -3,7 +3,7 @@
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ArrowDown01Icon, Logout01Icon, Store01Icon } from "@hugeicons/core-free-icons";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useQuery } from "convex/react";
 import { useEffect, useState } from "react";
 
@@ -54,7 +54,6 @@ function LowStockBadge({ count, overlay }: { count: number; overlay: boolean }) 
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   const user = useCurrentUser();
   const shop = useShop();
   const [collapsed, setCollapsed] = usePersistentState("shell:collapsed", false);
@@ -105,7 +104,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   async function signOut() {
     try {
       await authClient.signOut();
-      router.push("/sign-in");
+      // Full-page navigation on purpose — see app-header.tsx. A soft push can
+      // race the server cookie clear, and the (unauth) layout then bounces an
+      // "authenticated" user back to /dashboard. A hard load makes a fresh
+      // request with the cleared cookie so the guard evaluates correctly.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+      window.location.assign("/sign-in");
     } catch (err) {
       toastError(err);
     }

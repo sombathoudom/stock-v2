@@ -6,8 +6,12 @@ import { type DataModel } from "./_generated/dataModel";
 import { query } from "./_generated/server";
 import authConfig from "./auth.config";
 
-// The URL of your app. Better Auth uses it for cookie security and redirects.
-const siteUrl = process.env.APP_URL!;
+// The URL of your app. Better Auth uses it for cookie security, trusted
+// origins and redirects — a wrong/missing value makes sign-out's cookie
+// clear miss the session cookie, so the user never actually logs out.
+// Read SITE_URL (set on the Convex deployment); fall back to localhost in
+// dev so a missing var can't silently break auth.
+const siteUrl = process.env.SITE_URL ?? "http://localhost:3000";
 
 // The component client has methods needed for integrating Convex with Better Auth,
 // as well as helper methods for general use.
