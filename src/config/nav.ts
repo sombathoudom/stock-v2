@@ -23,9 +23,12 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 
+import { availableReports, type ReportLabelKey } from "@/config/reports";
+
 export type NavItem = {
-  /** Key into labels[lang].nav — the display name. */
-  labelKey:
+  /** Key into labels[lang].nav — the display name. Optional when `label` is
+   *  provided directly (e.g. report sub-items reuse the reports labels). */
+  labelKey?:
     | "dashboard"
     | "sales"
     | "products"
@@ -45,6 +48,9 @@ export type NavItem = {
     | "importProducts"
     | "openingStock"
     | "more";
+  /** For report sub-items: resolve the label from t().reports[reportLabelKey]
+   *  instead of the nav namespace. */
+  reportLabelKey?: ReportLabelKey;
   href: string;
   /** hugeicons icon data object — rendered through HugeiconsIcon. */
   icon: IconSvgElement;
@@ -177,6 +183,15 @@ export const navItems: NavItem[] = [
     icon: Analytics01Icon,
     phase: 5,
     inBottomNav: true,
+    // Each available report as a sidebar sub-item — jump straight to it from
+    // the nav. Built from the reports config so the two never drift; labels
+    // resolve from t().reports[...] via reportLabelKey.
+    children: availableReports.map((r) => ({
+      href: r.href,
+      icon: r.icon,
+      reportLabelKey: r.labelKey,
+      phase: 5,
+    })),
   },
   {
     labelKey: "settings",

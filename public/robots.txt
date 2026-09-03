@@ -4,4 +4,4 @@
 User-agent: *
 Disallow: /
 
-Sitemap: https://0676-36-37-204-107.ngrok-free.app/sitemap.xml
+Sitemap: https://pos.dolyoutfits.xyz/sitemap.xml

@@ -267,4 +267,30 @@ describe("shipping fee survival", () => {
     );
     expect(rejected).toBe("INVALID_INPUT");
   });
+
+  test("free delivery: customer fee 0 but the company still costs the shop and cuts profit", async () => {
+    const t = convexTest(schema, modules);
+    const ids = await seed(t); // company J&T defaultFee 300; Tee price 1000 / cost 400
+
+    // Owner gives free shipping to the customer (deliveryFee 0) but a company
+    // handles the package — the POS omits deliveryCost, so the server takes
+    // it from the company's default fee.
+    const detail = await t.mutation(api.sales.checkout, {
+      idempotencyKey: requestKey("checkout"),
+      customerId: ids.customerId,
+      salesChannelId: ids.channelId,
+      deliveryCompanyId: ids.companyId,
+      deliveryFee: 0, // free shipping to the customer
+      discount: 0,
+      items: [{ variantId: ids.teeM, qty: 1 }],
+    });
+
+    // Customer pays no shipping; the order total is just the item.
+    expect(detail.sale.deliveryFee).toBe(0);
+    expect(detail.total).toBe(1000);
+    // The company still charges the shop its default fee.
+    expect(detail.sale.deliveryCost).toBe(300);
+    // Profit = (1000 − 400) − 0 discount + 0 fee − 300 company cost = 300.
+    expect(detail.profit).toBe(300);
+  });
 });

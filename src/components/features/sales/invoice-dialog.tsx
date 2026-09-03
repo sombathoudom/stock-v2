@@ -4,6 +4,7 @@ import { Cancel01Icon, PrinterIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { FunctionReturnType } from "convex/server";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import { api } from "@convex/_generated/api";
@@ -36,11 +37,16 @@ import { formatDateTime, formatMoney, getLang, t } from "@/lib/utils";
 // T10 step ⑦ / T25 — invoice preview + print, three ways:
 //   • Receipt (thermal)  — 80mm ESC/POS to the shop's configured printer
 //   • Package label      — 80mm ESC/POS label with customer + items + barcode
-//   • A5 invoice         — the browser print dialog (any OS printer; the
-//     @media print rules in globals.css pin the A5 page size and hide the
-//     rest of the page).
-// The same payload shape the checkout mutation returns and the T12 detail
-// page reads (all money already re-derived server-side, integer cents).
+//   • Browser print      — an 80mm receipt or A5 sheet via the OS print
+//     dialog (no thermal printer needed).
+//
+// Browser printing detail: the receipt is rendered into a portal mounted
+// DIRECTLY on <body> (see PrintPortal). That's the whole trick — the dialog
+// centers itself with a CSS transform, and printing from INSIDE it clipped
+// the receipt and paginated the hidden app into many blank sheets. A body-
+// level portal has no transformed/positioned ancestors, so the @media print
+// rules only have to hide `body > *` and show this one node. The paper size
+// (80mm roll vs A5) is chosen with the body class + named @page in globals.css.
 
 /** Checkout/detail payload — one shared shape for T10 and T12. */
 export type SaleDetail = NonNullable<
@@ -53,6 +59,20 @@ export type SaleDetail = NonNullable<
 function billedQty(item: SaleDetail["items"][number]["item"]): number {
   return item.qtyOrdered - item.qtyCancelled - item.qtyReturned;
 }
+
+/** "BLUE/M" — color/size joined on one line; empty when the variant has none. */
+function variantSuffix(variant: SaleDetail["items"][number]["variant"]): string {
+  return [variant.color, variant.size].filter(Boolean).join("/");
+}
+
+type InvoiceContext = {
+  detail: SaleDetail;
+  shopName: string;
+  shopAddress?: string;
+  shopPhone?: string;
+  currency: string;
+  timezone: string;
+};
 
 export function InvoiceDialog({
   detail,
@@ -77,16 +97,28 @@ export function InvoiceDialog({
   onClose: () => void;
 }) {
   const [printing, setPrinting] = useState<"receipt" | "label" | null>(null);
+  // Which browser-print format is armed — drives the body class + which paper
+  // the print portal renders on. null = not printing.
+  const [browserFormat, setBrowserFormat] = useState<"a5" | "80" | null>(null);
 
-  function handlePrintA5() {
-    document.body.classList.add("printing-invoice");
-    window.addEventListener(
-      "afterprint",
-      () => document.body.classList.remove("printing-invoice"),
-      { once: true }
-    );
-    window.print();
+  // Browser printing via the OS print dialog. We mount the receipt portal
+  // (below), set the body class that picks the @page size, print, then clean
+  // up on afterprint. A rAF lets React commit the portal before print fires.
+  function browserPrint(format: "a5" | "80") {
+    const bodyClass =
+      format === "a5" ? "printing-invoice" : "printing-receipt-80";
+    setBrowserFormat(format);
+    document.body.classList.add(bodyClass);
+    const cleanup = () => {
+      document.body.classList.remove(bodyClass);
+      setBrowserFormat(null);
+    };
+    window.addEventListener("afterprint", cleanup, { once: true });
+    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
   }
+
+  const handlePrintA5 = () => browserPrint("a5");
+  const handlePrint80 = () => browserPrint("80");
 
   const printDoc = detail
     ? toPrintSale(detail, { shopName, shopAddress, shopPhone, currency, timezone })
@@ -108,216 +140,263 @@ export function InvoiceDialog({
     }
   }
 
-  // Subtotal is total + discount − deliveryFee (recomputed here for display;
-  // every money value in the payload is already server-derived).
-  const subtotal = detail
-    ? detail.total + detail.sale.discount - detail.sale.deliveryFee
-    : 0;
+  const ctx: InvoiceContext | null = detail
+    ? { detail, shopName, shopAddress, shopPhone, currency, timezone }
+    : null;
 
   return (
-    <Dialog
-      open={detail !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
-        {detail && (
-          <div className="invoice-print-area flex flex-col gap-3">
-            <DialogHeader className="hidden">
-              <DialogTitle>{t().sales.invoice}</DialogTitle>
-              <DialogDescription>{detail.sale.code}</DialogDescription>
-            </DialogHeader>
+    <>
+      <Dialog
+        open={detail !== null}
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+          <DialogHeader className="sr-only">
+            <DialogTitle>{t().sales.invoice}</DialogTitle>
+            <DialogDescription>{detail?.sale.code ?? ""}</DialogDescription>
+          </DialogHeader>
 
-            <div className="text-center">
-              <p className="text-lg font-bold">{shopName}</p>
-              {shopAddress ? (
-                <p className="text-sm text-muted-foreground">{shopAddress}</p>
-              ) : null}
-            </div>
+          {/* On-screen preview. */}
+          {ctx && <InvoiceBody ctx={ctx} />}
 
-            <div className="flex items-center justify-between gap-2 text-sm">
-              <span className="font-semibold">{detail.sale.code}</span>
-              <span>{formatDateTime(detail.sale.createdAt, timezone, getLang())}</span>
-            </div>
-
-            {/* Customer + order info — plain "Label: value" lines, no box.
-                Phone/address/delivery-by print only when present (self-pickup
-                orders have no company). The sender is the shop. */}
-            <div className="flex flex-col gap-0.5 text-sm">
-              <p>
-                <span className="text-muted-foreground">{t().sales.customer}:</span>{" "}
-                <span className="font-medium">{detail.customer.name}</span>
+          <DialogFooter className="sm:justify-end">
+            {!printerConfig ? (
+              <p className="w-full text-xs text-muted-foreground">
+                {t().sales.printHint}
               </p>
-              {detail.customer.phone ? (
-                <p>
-                  <span className="text-muted-foreground">{t().common.phone}:</span>{" "}
-                  <span className="tabular-nums">{detail.customer.phone}</span>
-                </p>
-              ) : null}
-              {detail.customer.address ? (
-                <p>
-                  <span className="text-muted-foreground">{t().sales.location}:</span>{" "}
-                  {detail.customer.address}
-                </p>
-              ) : null}
-              {detail.company ? (
-                <p>
-                  <span className="text-muted-foreground">
-                    {t().sales.deliveryBy}:
-                  </span>{" "}
-                  {detail.company.name}
-                </p>
-              ) : null}
-              <p>
-                <span className="text-muted-foreground">{t().sales.sender}:</span>{" "}
-                {shopPhone ? shopPhone : shopName}
-              </p>
+            ) : null}
+            <div className="flex w-full flex-col gap-2">
+              {printerConfig ? (
+                // Thermal printer set up: one-tap thermal is primary; the
+                // browser 80mm / A5 stay available as backups.
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={printing !== null}
+                    onClick={() => void doThermal("receipt")}
+                  >
+                    <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
+                    {t().sales.printReceipt}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={printing !== null}
+                    onClick={() => void doThermal("label")}
+                  >
+                    <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
+                    {t().sales.printLabel}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={handlePrint80}>
+                    <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
+                    {t().sales.print80}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={handlePrintA5}>
+                    <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
+                    {t().sales.printA5}
+                  </Button>
+                </>
+              ) : (
+                // No printer configured: default to the 80mm browser receipt;
+                // A5 stays secondary.
+                <>
+                  <Button type="button" onClick={handlePrint80}>
+                    <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
+                    {t().sales.print80}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={handlePrintA5}>
+                    <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
+                    {t().sales.printA5}
+                  </Button>
+                </>
+              )}
             </div>
+            <Button type="button" variant="destructive" onClick={onClose}>
+              <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
+              {t().sales.close}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="py-1.5">{t().common.name}</TableHead>
-                  <TableHead className="py-1.5 text-right">{t().sales.qty}</TableHead>
-                  <TableHead className="py-1.5 text-right">{t().sales.price}</TableHead>
-                  <TableHead className="py-1.5 text-right">{t().sales.total}</TableHead>
+      {/* Print-only copy mounted on <body> (no transformed ancestors) — the
+          @media print rules show only this node. Rendered solely while a
+          browser print is armed. */}
+      {ctx && browserFormat !== null ? <PrintPortal ctx={ctx} /> : null}
+    </>
+  );
+}
+
+/** The receipt body — shared by the on-screen preview and the print portal. */
+function InvoiceBody({ ctx }: { ctx: InvoiceContext }) {
+  const { detail, shopName, shopAddress, shopPhone, currency, timezone } = ctx;
+  // Subtotal is total + discount − deliveryFee (recomputed for display; every
+  // money value in the payload is already server-derived).
+  const subtotal = detail.total + detail.sale.discount - detail.sale.deliveryFee;
+
+  return (
+    <div className="invoice-print-area flex flex-col gap-3">
+      <div className="text-center">
+        <p className="text-lg font-bold">{shopName}</p>
+        {shopAddress ? (
+          <p className="text-sm text-muted-foreground">{shopAddress}</p>
+        ) : null}
+      </div>
+
+      {/* Order code + date on ONE tight line to save paper (was wrapping to
+          two lines each). */}
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="whitespace-nowrap font-semibold">{detail.sale.code}</span>
+        <span className="whitespace-nowrap text-muted-foreground">
+          {formatDateTime(detail.sale.createdAt, timezone, getLang())}
+        </span>
+      </div>
+
+      {/* Customer + order info — plain "Label: value" lines, no box.
+          Phone/address/delivery-by print only when present. Sender = shop. */}
+      <div className="flex flex-col gap-0.5 text-sm">
+        <p>
+          <span className="text-muted-foreground">{t().sales.customer}:</span>{" "}
+          <span className="font-medium">{detail.customer.name}</span>
+        </p>
+        {detail.customer.phone ? (
+          <p>
+            <span className="text-muted-foreground">{t().common.phone}:</span>{" "}
+            <span className="tabular-nums">{detail.customer.phone}</span>
+          </p>
+        ) : null}
+        {detail.customer.address ? (
+          <p>
+            <span className="text-muted-foreground">{t().sales.location}:</span>{" "}
+            {detail.customer.address}
+          </p>
+        ) : null}
+        {detail.company ? (
+          <p>
+            <span className="text-muted-foreground">{t().sales.deliveryBy}:</span>{" "}
+            {detail.company.name}
+          </p>
+        ) : null}
+        <p>
+          <span className="text-muted-foreground">{t().sales.sender}:</span>{" "}
+          {shopPhone ? shopPhone : shopName}
+        </p>
+      </div>
+
+      {/* Compact 3-column layout: Product (name COLOR/SIZE), Qty, Total. */}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="py-1.5">{t().sales.item}</TableHead>
+            <TableHead className="py-1.5 text-right">{t().sales.qty}</TableHead>
+            <TableHead className="py-1.5 text-right">{t().sales.total}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {detail.items
+            .map(({ item, variant, product }) => ({
+              item,
+              variant,
+              product,
+              billed: billedQty(item),
+            }))
+            .filter(({ billed }) => billed > 0)
+            .map(({ item, variant, product, billed }) => {
+              const suffix = variantSuffix(variant);
+              return (
+                <TableRow key={item._id}>
+                  <TableCell className="py-1.5">
+                    {product.name}
+                    {suffix ? (
+                      <span className="text-muted-foreground"> / {suffix}</span>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="py-1.5 text-right tabular-nums">
+                    {billed}
+                  </TableCell>
+                  <TableCell className="py-1.5 text-right tabular-nums">
+                    {formatMoney(
+                      item.unitPrice * billed - (item.discount ?? 0),
+                      currency,
+                      getLang()
+                    )}
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {detail.items
-                  .map(({ item, variant, product }) => ({
-                    item,
-                    variant,
-                    product,
-                    billed: billedQty(item),
-                  }))
-                  .filter(({ billed }) => billed > 0)
-                  .map(({ item, variant, product, billed }) => (
-                    <TableRow key={item._id}>
-                      <TableCell className="py-1.5">
-                        {product.name}
-                        <span className="block text-xs text-muted-foreground">
-                          {variant.size}
-                          {variant.color ? ` · ${variant.color}` : ""}
-                        </span>
-                      </TableCell>
-                      <TableCell className="py-1.5 text-right tabular-nums">
-                        {billed}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-right tabular-nums">
-                        {formatMoney(item.unitPrice, currency, getLang())}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-right tabular-nums">
-                        {formatMoney(
-                          item.unitPrice * billed - (item.discount ?? 0),
-                          currency,
-                          getLang()
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-              </TableBody>
-            </Table>
+              );
+            })}
+        </TableBody>
+      </Table>
 
-            <div className="flex flex-col gap-1 text-sm">
-              <div className="flex justify-between">
-                <span>{t().sales.subtotal}</span>
-                <span className="tabular-nums">
-                  {formatMoney(subtotal, currency, getLang())}
-                </span>
-              </div>
-              {detail.sale.discount > 0 && (
-                <div className="flex justify-between text-muted-foreground">
-                  <span>{t().sales.discount}</span>
-                  <span className="tabular-nums">
-                    −{formatMoney(detail.sale.discount, currency, getLang())}
-                  </span>
-                </div>
-              )}
-              {detail.sale.deliveryFee > 0 && (
-                <div className="flex justify-between text-muted-foreground">
-                  <span>{t().sales.deliveryFee}</span>
-                  <span className="tabular-nums">
-                    {formatMoney(detail.sale.deliveryFee, currency, getLang())}
-                  </span>
-                </div>
-              )}
-              <div className="flex justify-between border-t pt-1 font-bold">
-                <span>{t().sales.total}</span>
-                <span className="tabular-nums">
-                  {formatMoney(detail.total, currency, getLang())}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>{t().sales.paid}</span>
-                <span className="tabular-nums">
-                  {formatMoney(detail.paid, currency, getLang())}
-                </span>
-              </div>
-              {detail.remaining > 0 && (
-                <div className="flex justify-between font-semibold">
-                  <span>{t().sales.remaining}</span>
-                  <span className="tabular-nums">
-                    {formatMoney(detail.remaining, currency, getLang())}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-8 flex justify-end">
-              <div className="w-40 border-t border-dashed pt-1 text-center text-xs text-muted-foreground">
-                {t().sales.signature}
-              </div>
-            </div>
-
-            <p className="text-center text-xs text-muted-foreground">
-              {t().sales.thankyou}
-            </p>
+      <div className="flex flex-col gap-1 text-sm">
+        <div className="flex justify-between">
+          <span>{t().sales.subtotal}</span>
+          <span className="tabular-nums">
+            {formatMoney(subtotal, currency, getLang())}
+          </span>
+        </div>
+        {detail.sale.discount > 0 && (
+          <div className="flex justify-between text-muted-foreground">
+            <span>{t().sales.discount}</span>
+            <span className="tabular-nums">
+              −{formatMoney(detail.sale.discount, currency, getLang())}
+            </span>
           </div>
         )}
-
-        <DialogFooter className="sm:justify-end">
-          {!printerConfig ? (
-            <p className="w-full text-xs text-muted-foreground">
-              {t().sales.printHint}
-            </p>
-          ) : null}
-          <div className="flex w-full flex-col gap-2">
-            {printerConfig ? (
-              <>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={printing !== null}
-                  onClick={() => void doThermal("receipt")}
-                >
-                  <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
-                  {t().sales.printReceipt}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={printing !== null}
-                  onClick={() => void doThermal("label")}
-                >
-                  <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
-                  {t().sales.printLabel}
-                </Button>
-              </>
-            ) : null}
-            <Button type="button" onClick={handlePrintA5}>
-              <HugeiconsIcon icon={PrinterIcon} strokeWidth={2} className="size-4" />
-              {t().sales.printA5}
-            </Button>
+        {/* Always shown — even when 0 (free delivery), so the customer sees
+            shipping was not charged. */}
+        <div className="flex justify-between text-muted-foreground">
+          <span>{t().sales.deliveryFee}</span>
+          <span className="tabular-nums">
+            {formatMoney(detail.sale.deliveryFee, currency, getLang())}
+          </span>
+        </div>
+        <div className="flex justify-between border-t pt-1 font-bold">
+          <span>{t().sales.total}</span>
+          <span className="tabular-nums">
+            {formatMoney(detail.total, currency, getLang())}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span>{t().sales.paid}</span>
+          <span className="tabular-nums">
+            {formatMoney(detail.paid, currency, getLang())}
+          </span>
+        </div>
+        {detail.remaining > 0 && (
+          <div className="flex justify-between font-semibold">
+            <span>{t().sales.remaining}</span>
+            <span className="tabular-nums">
+              {formatMoney(detail.remaining, currency, getLang())}
+            </span>
           </div>
-          <Button type="button" variant="destructive" onClick={onClose}>
-            <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
-            {t().sales.close}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        )}
+      </div>
+
+      <div className="mt-8 flex justify-end">
+        <div className="w-40 border-t border-dashed pt-1 text-center text-xs text-muted-foreground">
+          {t().sales.signature}
+        </div>
+      </div>
+
+      <p className="text-center text-xs text-muted-foreground">
+        {t().sales.thankyou}
+      </p>
+    </div>
+  );
+}
+
+/** The receipt rendered directly on <body> for printing — no transformed or
+ * scroll-clipping ancestors, so it prints at the page origin with correct
+ * pagination. Only mounted while a browser print is armed. */
+function PrintPortal({ ctx }: { ctx: InvoiceContext }) {
+  return createPortal(
+    <div id="invoice-print-root">
+      <InvoiceBody ctx={ctx} />
+    </div>,
+    document.body
   );
 }
 

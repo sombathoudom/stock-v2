@@ -146,26 +146,62 @@
   }
 }
 
-/* Invoice printing (T10 step ⑦ / T25): while body.printing-invoice is set,
-   everything on the page is hidden except the invoice area, which is pinned
-   to the top of the print sheet. The class is added around window.print()
-   and removed on afterprint (see invoice-dialog.tsx). */
+/* Invoice printing (T10 step ⑦ / T25). The receipt is rendered into a portal
+   mounted DIRECTLY on <body> (#invoice-print-root, see invoice-dialog.tsx),
+   so it has no transformed/scroll-clipping ancestors. A body class chosen at
+   print time (printing-invoice = A5, printing-receipt-80 = 80mm roll) hides
+   everything else and picks the paper. The receipt prints in NORMAL flow, so
+   a long one paginates correctly and a short one is a single page — no more
+   blank trailing sheets or left-clipping. */
+
+/* Named @page rules: @page can't be selected by a body class but CAN be
+   selected by an element via `page: <name>`. */
+@page invoice-a5 {
+  size: A5;
+}
+@page receipt-80 {
+  size: 80mm auto; /* continuous roll: fixed width, auto height */
+  margin: 3mm;
+}
+
 @media print {
-  /* T25 — the browser print dialog picks any OS printer; the sheet itself is
-     A5 (the delivery invoice format). */
-  @page {
-    size: A5;
+  html,
+  body.printing-invoice,
+  body.printing-receipt-80 {
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
   }
-  body.printing-invoice * {
-    visibility: hidden;
+
+  /* Hide the entire app; show ONLY the body-level print portal. display:none
+     (not visibility) removes the app from layout so it can't generate blank
+     pages. The portal is a direct <body> child, so this selector is exact. */
+  body.printing-invoice > *:not(#invoice-print-root),
+  body.printing-receipt-80 > *:not(#invoice-print-root) {
+    display: none !important;
   }
-  body.printing-invoice .invoice-print-area,
-  body.printing-invoice .invoice-print-area * {
-    visibility: visible;
+
+  #invoice-print-root {
+    display: block !important;
+    position: static !important;
+    margin: 0 !important;
+    /* Inner breathing room so text isn't jammed against the paper edge
+       (on top of the @page margin). */
+    padding: 2mm 3mm !important;
+    background: #fff !important;
   }
-  body.printing-invoice .invoice-print-area {
-    position: absolute;
-    inset: 0 auto auto 0;
+
+  /* Opt each format into its named page size + fit the width. */
+  body.printing-invoice #invoice-print-root .invoice-print-area {
+    page: invoice-a5;
     width: 100%;
+  }
+  body.printing-receipt-80 #invoice-print-root .invoice-print-area {
+    page: receipt-80;
+    /* Fits inside 80mm − @page 3mm×2 − root padding 3mm×2 ≈ 68mm. */
+    width: 100%;
+    font-size: 11px;
   }
 }

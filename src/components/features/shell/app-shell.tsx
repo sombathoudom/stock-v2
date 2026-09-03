@@ -35,6 +35,13 @@ function NavIcon({ item }: { item: NavItem }) {
   return <HugeiconsIcon icon={item.icon} strokeWidth={2} className="size-5 shrink-0" />;
 }
 
+/** The display label for a nav item. Report sub-items resolve from the
+ * reports label namespace; everything else from the nav namespace. */
+function navLabel(item: NavItem): string {
+  if (item.reportLabelKey) return t().reports[item.reportLabelKey];
+  return item.labelKey ? t().nav[item.labelKey] : "";
+}
+
 /** T23 — the low-stock alert badge shown on the Stock nav item: a small
  * destructive count pill. In the collapsed sidebar / bottom nav it overlays
  * the icon; in the expanded sidebar and the drawer it sits right-aligned. */
@@ -156,7 +163,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <Link
                       href={item.href}
                       aria-current={isActive(pathname, item.href) ? "page" : undefined}
-                      title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
+                      title={effectiveCollapsed ? navLabel(item) : undefined}
                       className={cn(
                         "flex min-w-0 flex-1 items-center gap-3 px-3 py-2",
                         effectiveCollapsed && "justify-center px-0",
@@ -164,7 +171,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     >
                       <NavIcon item={item} />
                       {!effectiveCollapsed && (
-                        <span className="truncate">{t().nav[item.labelKey]}</span>
+                        <span className="truncate">{navLabel(item)}</span>
                       )}
                       {isStock && lowCount > 0 && (
                         <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
@@ -174,7 +181,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       <button
                         type="button"
                         onClick={() => toggleExpanded(item.href)}
-                        aria-label={t().nav[item.labelKey]}
+                        aria-label={navLabel(item)}
                         aria-expanded={isExpanded}
                         className="flex shrink-0 items-center px-2 py-2"
                       >
@@ -193,7 +200,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <Link
                     href={item.href}
                     aria-current={isActive(pathname, item.href) ? "page" : undefined}
-                    title={effectiveCollapsed ? t().nav[item.labelKey] : undefined}
+                    title={effectiveCollapsed ? navLabel(item) : undefined}
                     className={cn(
                       "relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                       isActive(pathname, item.href)
@@ -203,7 +210,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     )}
                   >
                     <NavIcon item={item} />
-                    {!effectiveCollapsed && <span className="truncate">{t().nav[item.labelKey]}</span>}
+                    {!effectiveCollapsed && <span className="truncate">{navLabel(item)}</span>}
                     {isStock && lowCount > 0 && (
                       <LowStockBadge count={lowCount} overlay={effectiveCollapsed} />
                     )}
@@ -225,7 +232,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         )}
                       >
                         <HugeiconsIcon icon={child.icon} strokeWidth={2} className="size-4 shrink-0" />
-                        <span className="truncate">{t().nav[child.labelKey]}</span>
+                        <span className="truncate">{navLabel(child)}</span>
                       </Link>
                     ))}
                   </div>
@@ -288,7 +295,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2"
                       >
                         <NavIcon item={item} />
-                        <span className="truncate">{t().nav[item.labelKey]}</span>
+                        <span className="truncate">{navLabel(item)}</span>
                         {item.labelKey === "stock" && lowCount > 0 && (
                           <LowStockBadge count={lowCount} overlay={false} />
                         )}
@@ -296,7 +303,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       <button
                         type="button"
                         onClick={() => toggleExpanded(item.href)}
-                        aria-label={t().nav[item.labelKey]}
+                        aria-label={navLabel(item)}
                         aria-expanded={isExpanded}
                         className="flex shrink-0 items-center px-2 py-2"
                       >
@@ -324,7 +331,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       )}
                     >
                       <NavIcon item={item} />
-                      <span className="truncate">{t().nav[item.labelKey]}</span>
+                      <span className="truncate">{navLabel(item)}</span>
                       {item.labelKey === "stock" && lowCount > 0 && (
                         <LowStockBadge count={lowCount} overlay={false} />
                       )}
@@ -346,7 +353,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                           )}
                         >
                           <HugeiconsIcon icon={child.icon} strokeWidth={2} className="size-4 shrink-0" />
-                          <span className="truncate">{t().nav[child.labelKey]}</span>
+                          <span className="truncate">{navLabel(child)}</span>
                         </Link>
                       ))}
                     </div>
@@ -409,7 +416,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <LowStockBadge count={lowCount} overlay />
                   )}
                 </span>
-                <span className="truncate">{t().nav[item.labelKey]}</span>
+                <span className="truncate">{navLabel(item)}</span>
               </Link>
             );
           })}

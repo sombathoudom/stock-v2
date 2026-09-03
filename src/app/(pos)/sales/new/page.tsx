@@ -55,7 +55,6 @@ import { useIdempotentSubmit } from "@/hooks/use-idempotent-submit";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import {
-  centsToInput,
   formatMoney,
   getLang,
   inputToCents,
@@ -160,9 +159,6 @@ export default function NewSalePage() {
   // here — the server takes it from the company.
   const [discount, setDiscount] = useState("");
   const [shippingFee, setShippingFee] = useState("");
-  // Last value the company auto-fill wrote — lets us tell "still the
-  // suggested fee" (safe to replace) from "the cashier typed this".
-  const autoFeeRef = useRef("");
   const [method, setMethod] = useState<CheckoutMethod>("cash");
   const [amount, setAmount] = useState("");
 
@@ -209,20 +205,13 @@ export default function NewSalePage() {
     prevOrderOpenRef.current = orderOpen;
   }, [orderOpen]);
 
-  // ④ Delivery company → shipping-fee auto-fill. The company's default fee
-  // lands in the shipping input; a fee the cashier typed themselves is never
-  // clobbered (only an empty box or the previous suggestion is replaced).
+  // ④ Delivery company. Picking a company does NOT auto-charge the customer
+  // a shipping fee: the company's default fee is what the SHOP pays the
+  // company (deliveryCost, handled server-side), not what the customer pays.
+  // The customer shipping fee stays exactly what the cashier types — empty
+  // means no shipping charge on the invoice.
   function onCompanyChange(value: string | null) {
     setCompanyId(value);
-    const suggested =
-      value === null
-        ? ""
-        : centsToInput(companies.find((c) => c._id === value)?.defaultFee ?? 0);
-    const previous = autoFeeRef.current;
-    autoFeeRef.current = suggested;
-    setShippingFee((current) =>
-      current === "" || current === previous ? suggested : current
-    );
   }
 
   // Display totals only — the server re-derives everything at checkout.
@@ -265,7 +254,6 @@ export default function NewSalePage() {
     setCompanyId(null);
     setDiscount("");
     setShippingFee("");
-    autoFeeRef.current = "";
     setMethod("cash");
     setAmount("");
     setSearch("");
@@ -342,7 +330,6 @@ export default function NewSalePage() {
       setCompanyId(null);
       setDiscount("");
       setShippingFee("");
-      autoFeeRef.current = "";
       setMethod("cash");
       setAmount("");
     } catch (err) {
