@@ -26,6 +26,7 @@ COPY . .
 ARG NEXT_PUBLIC_CONVEX_URL
 ARG NEXT_PUBLIC_CONVEX_SITE_URL
 ARG APP_URL
+ARG CONVEX_DEPLOY_KEY
 
 ENV NEXT_PUBLIC_CONVEX_URL=${NEXT_PUBLIC_CONVEX_URL}
 ENV NEXT_PUBLIC_CONVEX_SITE_URL=${NEXT_PUBLIC_CONVEX_SITE_URL}
@@ -33,7 +34,16 @@ ENV APP_URL=${APP_URL}
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
-RUN npm run build
+# When CONVEX_DEPLOY_KEY is provided, `build:convex` pushes the convex/
+# functions to the Convex backend and then runs `next build` with the correct
+# NEXT_PUBLIC_CONVEX_URL. Without a key, fall back to a plain frontend build.
+# This ARG lives only in the builder stage — it is never copied into the
+# final runtime image below.
+RUN if [ -n "${CONVEX_DEPLOY_KEY}" ]; then \
+      CONVEX_DEPLOY_KEY="${CONVEX_DEPLOY_KEY}" npm run build:convex; \
+    else \
+      npm run build; \
+    fi
 
 
 # =========================

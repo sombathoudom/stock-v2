@@ -481,6 +481,8 @@ export const labels = {
       pickSizesHint: "Pick the size of each item. Sizes can be mixed.",
       addToCart: "Add set to cart",
       outOfStock: "Out of stock",
+      sellSet: "Sets",
+      pickSetHint: "Pick a set to add to the sale.",
     },
     purchases: {
       addPurchase: "New Purchase",
@@ -1746,6 +1748,8 @@ export const labels = {
       pickSizesHint: "ជ្រើសទំហំនៃទំនិញនីមួយៗ។ ទំហំអាចខុសគ្នា។",
       addToCart: "បន្ថែមសំណុំទៅកន្ត្រក",
       outOfStock: "អស់ស្តុក",
+      sellSet: "សំណុំ",
+      pickSetHint: "ជ្រើសសំណុំដើម្បីបន្ថែមទៅការលក់។",
     },
     purchases: {
       addPurchase: "ការទិញចូលថ្មី",
