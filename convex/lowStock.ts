@@ -6,7 +6,7 @@ import type { QueryCtx } from "./_generated/server";
 import { query } from "./_generated/server";
 import { requireUser } from "./helpers";
 import { variantLabel } from "./sales";
-import { variantQty } from "./stock";
+import { stockInfoByVariant } from "./stock";
 import { lowStockItem } from "./types";
 
 // T23 — Low-stock alerts (AGENTS.md). ONE shared walk computes every variant
@@ -17,18 +17,18 @@ import { lowStockItem } from "./types";
 
 /** The shop's low-stock walk: active products and their ACTIVE variants
  * (soft-deleted sizes never nag the owner) with computed stock at or below
- * the threshold, worst offenders first. Bounded product walk; ledger sums
- * are one indexed eq-collect per variant — the ledger table is never
- * scanned. */
+ * the threshold, worst offenders first. Reads the ledger ONCE (batched by
+ * variant) instead of one collect per variant — this walk runs on every page
+ * via the nav badge, so the old N+1 got slow as the catalog grew. */
 export async function collectLowStock(
   ctx: { db: QueryCtx["db"] },
   shop: Doc<"shop">
 ): Promise<{ threshold: number; items: Infer<typeof lowStockItem>[] }> {
   const threshold = shop.lowStockThreshold ?? 5;
-  const products = await ctx.db
-    .query("products")
-    .withIndex("by_nameLower", (q) => q)
-    .take(1000);
+  const [products, stockByVariant] = await Promise.all([
+    ctx.db.query("products").withIndex("by_nameLower", (q) => q).take(1000),
+    stockInfoByVariant(ctx),
+  ]);
   const items: Infer<typeof lowStockItem>[] = [];
   for (const product of products) {
     if (!product.active) continue;
@@ -38,7 +38,8 @@ export async function collectLowStock(
       .collect();
     for (const variant of variants) {
       if (!variant.active) continue;
-      const qty = await variantQty(ctx, variant._id);
+      // No ledger rows = never moved = 0 on hand.
+      const qty = stockByVariant.get(variant._id)?.qty ?? 0;
       if (qty <= threshold) {
         items.push({
           productId: product._id,

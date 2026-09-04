@@ -48,6 +48,38 @@ export async function variantQty(
   return (await variantStockInfo(ctx, variantId)).qty;
 }
 
+/** BATCHED stock: read the whole ledger ONCE and group deltas by variant,
+ * returning a map of {qty, lastMovementTs} per variant. This is the fast path
+ * for catalog-wide / whole-page walks (stock list, low-stock, CSV, count) —
+ * one table scan + in-memory group instead of one indexed collect PER variant
+ * (an N+1 that got slow as the catalog and ledger grew). Same pure sum(delta)
+ * math as variantStockInfo, so results are identical; the ledger stays the
+ * only source of truth (rule #1) — this just reads it more efficiently.
+ *
+ * Convex has no IN-query, so per-variant indexed reads can't be batched by id
+ * set; scanning the ledger once via by_ts and bucketing is cheaper than N
+ * separate indexed queries once there are many variants. */
+export async function stockInfoByVariant(ctx: {
+  db: QueryCtx["db"];
+}): Promise<Map<Id<"productVariants">, { qty: number; lastMovementTs: number | undefined }>> {
+  const map = new Map<
+    Id<"productVariants">,
+    { qty: number; lastMovementTs: number | undefined }
+  >();
+  for await (const row of ctx.db.query("stockLedger").withIndex("by_ts")) {
+    const cur = map.get(row.variantId);
+    if (cur === undefined) {
+      map.set(row.variantId, { qty: row.delta, lastMovementTs: row.ts });
+    } else {
+      cur.qty += row.delta;
+      if (cur.lastMovementTs === undefined || row.ts > cur.lastMovementTs) {
+        cur.lastMovementTs = row.ts;
+      }
+    }
+  }
+  return map;
+}
+
 // Paginated stock list: rows are products (alphabetical, optional prefix
 // search on the name index); each row carries every variant with its
 // computed stock and newest movement time. Batched, indexed reads only.
@@ -73,27 +105,27 @@ export const list = query({
     const page = await build().order("asc").paginate(args.paginationOpts);
     const total = (await build().take(1000)).length;
 
+    // Read the ledger ONCE for the whole page instead of one collect per
+    // variant (the old N+1). Same pure sum(delta) result per variant.
+    const stockByVariant = await stockInfoByVariant(ctx);
     const rows = await Promise.all(
       page.page.map(async (product) => {
         const variants = await ctx.db
           .query("productVariants")
           .withIndex("by_product", (q) => q.eq("productId", product._id))
           .collect();
-        const withQty = await Promise.all(
-          variants.map(async (variant) => {
-            const { qty, lastMovementTs } = await variantStockInfo(
-              ctx,
-              variant._id
-            );
-            return {
-              variant,
-              qty,
-              // Spread, not assignment: `undefined` fails Convex validators,
-              // but an absent key is fine for an optional field.
-              ...(lastMovementTs !== undefined ? { lastMovementTs } : {}),
-            };
-          })
-        );
+        const withQty = variants.map((variant) => {
+          const info = stockByVariant.get(variant._id);
+          const qty = info?.qty ?? 0;
+          const lastMovementTs = info?.lastMovementTs;
+          return {
+            variant,
+            qty,
+            // Spread, not assignment: `undefined` fails Convex validators,
+            // but an absent key is fine for an optional field.
+            ...(lastMovementTs !== undefined ? { lastMovementTs } : {}),
+          };
+        });
         return { product, variants: withQty };
       })
     );
@@ -109,10 +141,10 @@ export const stockCsv = query({
   returns: v.array(stockCsvRow),
   handler: async (ctx) => {
     await requireUser(ctx);
-    const products = await ctx.db
-      .query("products")
-      .withIndex("by_nameLower", (q) => q)
-      .take(1000);
+    const [products, stockByVariant] = await Promise.all([
+      ctx.db.query("products").withIndex("by_nameLower", (q) => q).take(1000),
+      stockInfoByVariant(ctx),
+    ]);
     const out: Infer<typeof stockCsvRow>[] = [];
     for (const product of products) {
       if (!product.active) continue;
@@ -127,7 +159,7 @@ export const stockCsv = query({
           size: variant.size,
           color: variant.color,
           sku: variant.sku,
-          qty: await variantQty(ctx, variant._id),
+          qty: stockByVariant.get(variant._id)?.qty ?? 0,
           price: variant.price ?? product.defaultPrice,
         });
       }
@@ -159,7 +191,10 @@ export const countStock = query({
       return ctx.db.query("products").withIndex("by_nameLower", (q) => q);
     };
 
-    const products = await buildQuery().take(1000);
+    const [products, stockByVariant] = await Promise.all([
+      buildQuery().take(1000),
+      stockInfoByVariant(ctx),
+    ]);
 
     // Collect category names for the lookup.
     const categoryIds = [
@@ -190,7 +225,7 @@ export const countStock = query({
       let totalQty = 0;
       for (const variant of variants) {
         if (!variant.active) continue;
-        const qty = await variantQty(ctx, variant._id);
+        const qty = stockByVariant.get(variant._id)?.qty ?? 0;
         variantRows.push({
           size: variant.size,
           ...(variant.color !== undefined ? { color: variant.color } : {}),
